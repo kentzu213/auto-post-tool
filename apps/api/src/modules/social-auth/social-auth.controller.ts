@@ -46,11 +46,11 @@ export class SocialAuthController {
       await this.socialAuthService.handleOAuthCallback(platform, code, workspaceId);
       
       // Chuyển hướng người dùng về trang giao diện với cờ success=true
-      const clientRedirectUrl = `http://localhost:3005/?auth_success=true&platform=${platform}`;
+      const clientRedirectUrl = `http://localhost:3005/accounts?auth_success=true&platform=${platform}`;
       return res.redirect(clientRedirectUrl);
     } catch (error: any) {
       // Chuyển hướng người dùng về trang giao diện kèm cờ báo lỗi
-      const clientRedirectUrl = `http://localhost:3005/?auth_error=true&message=${encodeURIComponent(error.message)}`;
+      const clientRedirectUrl = `http://localhost:3005/accounts?auth_error=true&message=${encodeURIComponent(error.message)}`;
       return res.redirect(clientRedirectUrl);
     }
   }

@@ -69,7 +69,7 @@ function MockOAuthContent() {
 
   const handleCancel = () => {
     // Go back to the Next.js app
-    window.location.href = 'http://localhost:3005/?auth_cancelled=true';
+    window.location.href = 'http://localhost:3005/accounts?auth_cancelled=true';
   };
 
   return (
