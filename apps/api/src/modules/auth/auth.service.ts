@@ -133,4 +133,111 @@ export class AuthService {
       } : null,
     };
   }
+
+  /**
+   * Xác thực và đồng bộ người dùng từ Supabase vào cơ sở dữ liệu Postgres cục bộ
+   */
+  async syncSupabaseUser(email: string, name: string, supabaseToken: string) {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+
+    // 1. Xác thực bảo mật Token qua API của Supabase
+    if (supabaseUrl && supabaseAnonKey && supabaseToken) {
+      try {
+        const axios = require('axios');
+        const response = await axios.get(`${supabaseUrl}/auth/v1/user`, {
+          headers: {
+            apikey: supabaseAnonKey,
+            Authorization: `Bearer ${supabaseToken}`
+          }
+        });
+
+        const supabaseUser = response.data;
+        if (supabaseUser.email !== email) {
+          throw new UnauthorizedException('Token Supabase không trùng khớp với email đăng nhập');
+        }
+      } catch (err: any) {
+        console.error('❌ Supabase verification failed:', err.message);
+        throw new UnauthorizedException('Token xác thực Supabase không hợp lệ hoặc đã hết hạn');
+      }
+    }
+
+    // 2. Tìm hoặc tự động đồng bộ người dùng cục bộ
+    let user = await this.prisma.user.findUnique({
+      where: { email },
+    });
+
+    if (!user) {
+      console.log(`🌐 Syncing new Supabase user locally: ${email}`);
+      const randomPassword = require('crypto').randomBytes(16).toString('hex');
+      const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
+      user = await this.prisma.$transaction(async (tx) => {
+        const newUser = await tx.user.create({
+          data: {
+            email,
+            password: hashedPassword,
+            name: name || email.split('@')[0],
+          },
+        });
+
+        // Tạo Workspace cá nhân mặc định cho user mới đồng bộ
+        const workspace = await tx.workspace.create({
+          data: {
+            name: `${newUser.name}'s Workspace`,
+            ownerId: newUser.id,
+          },
+        });
+
+        // Thêm Owner phân quyền Workspace
+        await tx.teamMember.create({
+          data: {
+            workspaceId: workspace.id,
+            userId: newUser.id,
+            role: 'owner',
+          },
+        });
+
+        // Ghi log hoạt động
+        await tx.auditLog.create({
+          data: {
+            userId: newUser.id,
+            action: 'supabase_sync_register',
+            details: `Đồng bộ tài khoản thành công từ izziapi.com thông qua Supabase. Tạo Workspace mặc định: ${workspace.name}`,
+          },
+        });
+
+        return newUser;
+      });
+    } else {
+      console.log(`🌐 Supabase user already synced locally: ${email}`);
+    }
+
+    // 3. Ký và trả về Local JWT Token để Frontend sử dụng bình thường
+    const workspaceMember = await this.prisma.teamMember.findFirst({
+      where: { userId: user.id },
+      include: { workspace: true },
+    });
+
+    const payload = { 
+      sub: user.id, 
+      email: user.email,
+      workspaceId: workspaceMember?.workspaceId || null
+    };
+
+    return {
+      accessToken: this.jwtService.sign(payload),
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+      },
+      defaultWorkspace: workspaceMember ? {
+        id: workspaceMember.workspace.id,
+        name: workspaceMember.workspace.name,
+        role: workspaceMember.role,
+      } : null,
+    };
+  }
 }
+

@@ -22,12 +22,14 @@ export class PostsService {
   async create(dto: CreatePostDto) {
     this.logger.log(`📝 Tạo bài viết mới cho workspace ${dto.workspaceId}...`);
 
+    // 0. Resolve workspace — ensure it exists (creates if needed)
+    const resolvedWorkspaceId = await this.ensureWorkspace(dto.workspaceId);
+
     // 1. Validate social accounts nếu có
     if (dto.socialAccountIds && dto.socialAccountIds.length > 0) {
       const accounts = await this.prisma.socialAccount.findMany({
         where: {
           id: { in: dto.socialAccountIds },
-          workspaceId: dto.workspaceId,
           status: 'active',
         },
       });
@@ -53,7 +55,7 @@ export class PostsService {
       // Tạo Post
       const post = await tx.post.create({
         data: {
-          workspaceId: dto.workspaceId,
+          workspaceId: resolvedWorkspaceId,
           title: dto.title,
           content: dto.content,
           campaignId: dto.campaignId,
@@ -284,5 +286,46 @@ export class PostsService {
     ]);
 
     return { total, draft, scheduled, published, failed };
+  }
+
+  /**
+   * Ensure workspace exists — create demo workspace if needed
+   * Replicates logic from SocialAuthService for consistency
+   */
+  private async ensureWorkspace(workspaceId: string): Promise<string> {
+    const existing = await this.prisma.workspace.findUnique({
+      where: { id: workspaceId },
+    });
+
+    if (existing) return workspaceId;
+
+    // Try to find any existing workspace (the one direct-connect created)
+    const anyWorkspace = await this.prisma.workspace.findFirst({
+      orderBy: { createdAt: 'desc' },
+    });
+    if (anyWorkspace) {
+      this.logger.log(`[ensureWorkspace] Workspace "${workspaceId}" not found, using existing workspace "${anyWorkspace.name}" (${anyWorkspace.id})`);
+      return anyWorkspace.id;
+    }
+
+    // Last resort: create a new demo workspace
+    this.logger.log(`[ensureWorkspace] Tạo Demo workspace...`);
+    const bcrypt = await import('bcrypt');
+    const hashedPassword = await bcrypt.hash('demo123456', 10);
+    
+    let demoUser = await this.prisma.user.findUnique({
+      where: { email: 'demo@autopost.local' },
+    });
+    if (!demoUser) {
+      demoUser = await this.prisma.user.create({
+        data: { email: 'demo@autopost.local', password: hashedPassword, name: 'Demo User' },
+      });
+    }
+
+    const workspace = await this.prisma.workspace.create({
+      data: { name: 'Demo Workspace', ownerId: demoUser.id },
+    });
+
+    return workspace.id;
   }
 }

@@ -1,12 +1,52 @@
 {
   "name": "@auto-post/desktop",
   "version": "1.0.0",
+  "description": "Premium Multi-Platform Auto-Posting SaaS Desktop App",
+  "author": "IzziAPI Dev Team",
   "private": true,
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build-win": "electron-builder --win nsis"
   },
-  "dependencies": {
-    "electron": "^28.2.0"
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^28.2.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.izzi.autopost",
+    "productName": "Izzi Auto Post",
+    "copyright": "Copyright © 2026 IzziAPI",
+    "publish": null,
+    "directories": {
+      "output": "dist-win"
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Izzi Auto Post",
+      "runAfterFinish": true,
+      "uninstallDisplayName": "Izzi Auto Post"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "launcher.html",
+      "build/**/*"
+    ]
   }
 }

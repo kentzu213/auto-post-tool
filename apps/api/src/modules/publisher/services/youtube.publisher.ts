@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { SocialAbstract } from './social.abstract';
 import { PublishResult } from '../interfaces/publisher.interface';
 import axios from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class YouTubePublisher extends SocialAbstract {
@@ -109,10 +111,9 @@ export class YouTubePublisher extends SocialAbstract {
           // Ref: https://developers.google.com/youtube/v3/guides/using_code_samples#uploads
           // ============================================================
 
-          // BƯỚC 1: Download video binary từ URL (MinIO/S3/CDN)
-          this.abstractLogger.log(`[Resumable Upload] Đang tải video từ URL nguồn...`);
-          const videoResponse = await axios.get(videoUrl, { responseType: 'arraybuffer' });
-          const videoBuffer = Buffer.from(videoResponse.data);
+          // BƯỚC 1: Download video binary từ URL hoặc đọc trực tiếp từ ổ đĩa
+          this.abstractLogger.log(`[Resumable Upload] Đang chuẩn bị video data...`);
+          const videoBuffer = await this.getBufferFromUrl(videoUrl);
           const videoSize = videoBuffer.byteLength;
           this.abstractLogger.log(`[Resumable Upload] Video size: ${(videoSize / 1024 / 1024).toFixed(2)} MB`);
 
@@ -156,10 +157,10 @@ export class YouTubePublisher extends SocialAbstract {
           // BƯỚC 4 (Tùy chọn): Upload thumbnail nếu có
           if (options?.thumbnailUrl) {
             try {
-              const thumbResponse = await axios.get(options.thumbnailUrl, { responseType: 'arraybuffer' });
+              const thumbBuffer = await this.getBufferFromUrl(options.thumbnailUrl);
               await axios.post(
                 `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}`,
-                Buffer.from(thumbResponse.data),
+                thumbBuffer,
                 {
                   headers: {
                     Authorization: `Bearer ${accessToken}`,
@@ -256,5 +257,45 @@ export class YouTubePublisher extends SocialAbstract {
       this.abstractLogger.error(`Lấy insights video YouTube ${publishedPostId} thất bại: ${error.message}`);
       return {};
     }
+  }
+
+  /**
+   * Tìm đường dẫn file cục bộ từ media URL
+   */
+  private getLocalFilePath(url: string): string | null {
+    if (!url.includes('/uploads/')) return null;
+    const filename = url.split('/uploads/').pop();
+    if (!filename) return null;
+
+    const pathsToTry = [
+      path.join(process.cwd(), 'uploads', filename), // API cwd
+      path.join(process.cwd(), '..', 'api', 'uploads', filename), // Worker cwd
+      path.resolve(__dirname, '..', '..', 'api', 'uploads', filename), // Built worker path 1
+      path.resolve(__dirname, '..', '..', '..', 'api', 'uploads', filename), // Built worker path 2
+      path.resolve(__dirname, '..', 'api', 'uploads', filename), // API built path
+      path.join('f:\\Ai Tools\\TOOL TỰ ĐỘNG ĐĂNG BÀI', 'apps', 'api', 'uploads', filename) // Ultimate hardcoded absolute path fallback
+    ];
+
+    for (const p of pathsToTry) {
+      if (fs.existsSync(p)) {
+        return p;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Tải nội dung file cục bộ và trả về Buffer
+   */
+  private async getBufferFromUrl(url: string): Promise<Buffer> {
+    const localPath = this.getLocalFilePath(url);
+    if (localPath) {
+      this.abstractLogger.log(`[Local Optimizer] Đọc trực tiếp file cục bộ tại: ${localPath}`);
+      return fs.readFileSync(localPath);
+    }
+
+    this.abstractLogger.log(`[HTTP Fetcher] Tải file từ xa: ${url}`);
+    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    return Buffer.from(response.data);
   }
 }

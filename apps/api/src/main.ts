@@ -9,6 +9,8 @@ import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
 import helmet from 'helmet';
+import * as express from 'express';
+import * as path from 'path';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -18,7 +20,12 @@ async function bootstrap() {
   // ============================================================
 
   // 1. Helmet — bảo vệ HTTP headers (XSS, clickjacking, MIME sniffing, etc.)
-  app.use(helmet());
+  app.use(helmet({
+    crossOriginResourcePolicy: false, // Cho phép Next.js (port 3005) load ảnh/video từ API (port 3001)
+  }));
+
+  // Phục vụ tĩnh thư mục uploads cục bộ phục vụ cho đăng media từ ổ đĩa
+  app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
   // 2. CORS — chỉ cho phép origins được chỉ định (không wildcard)
   const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3005')

@@ -133,3 +133,14 @@ Thumbs.db
 
 # Coverage
 coverage/
+
+# Electron build outputs (very large binaries)
+apps/desktop/dist-win/
+apps/desktop/dist/
+*.blockmap
+
+# User uploads & media test files
+apps/api/uploads/
+
+# Personal test workspace
+Test tool/

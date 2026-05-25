@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, Res } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, Body, Res } from '@nestjs/common';
 import { SocialAuthService } from './social-auth.service';
 import { Platform } from '@prisma/client';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
@@ -25,8 +25,39 @@ export class SocialAuthController {
     @Param('platform') platform: Platform,
     @Query('workspaceId') workspaceId: string,
   ) {
-    const redirectUrl = this.socialAuthService.getAuthRedirectUrl(platform, workspaceId);
+    const redirectUrl = await this.socialAuthService.getAuthRedirectUrl(platform, workspaceId);
     return { redirectUrl };
+  }
+
+  /**
+   * DIRECT CONNECT — Kết nối bằng Token trực tiếp (không cần OAuth redirect)
+   * User nhập App ID + Page Access Token → hệ thống validate → lưu → sẵn sàng đăng bài
+   */
+  @Post('direct-connect')
+  @ApiOperation({ summary: 'Kết nối trực tiếp bằng App ID + Page Access Token' })
+  @ApiQuery({ name: 'workspaceId', required: true })
+  @ApiResponse({ status: 201, description: 'Tài khoản đã được liên kết thành công' })
+  async directConnect(
+    @Query('workspaceId') workspaceId: string,
+    @Body() body: {
+      platform: Platform;
+      appId: string;
+      accessToken: string;
+    },
+  ) {
+    return this.socialAuthService.directConnect(
+      body.platform,
+      body.appId,
+      body.accessToken,
+      workspaceId,
+    );
+  }
+
+  @Post('disconnect')
+  @ApiOperation({ summary: 'Hủy kết nối một hoặc nhiều tài khoản MXH' })
+  @ApiResponse({ status: 200, description: 'Hủy kết nối thành công' })
+  async disconnectAccounts(@Body() body: { ids: string[] }) {
+    return this.socialAuthService.disconnectAccounts(body.ids);
   }
 
   @Get('callback/:platform')
@@ -55,3 +86,4 @@ export class SocialAuthController {
     }
   }
 }
+

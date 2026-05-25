@@ -2,27 +2,36 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../../common/services/crypto.service';
 import { Platform, AccountStatus } from '@prisma/client';
-import axios from 'axios';
+import { ProviderManager } from './providers/provider-manager';
+import { TikTokProvider } from './providers/tiktok.provider';
+import { CredentialsService } from './credentials.service';
 
 @Injectable()
 export class SocialAuthService {
   private readonly logger = new Logger(SocialAuthService.name);
 
+  /**
+   * In-memory storage cho PKCE code_verifier.
+   * Key = state (workspaceId), Value = { codeVerifier, createdAt }
+   * Entries tự động cleanup sau 10 phút.
+   */
+  private readonly pkceStore = new Map<string, { codeVerifier: string; createdAt: number }>();
+  private readonly PKCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
+    private readonly providerManager: ProviderManager,
+    private readonly credentialsService: CredentialsService,
   ) {}
 
   /**
-   * Lấy danh sách các tài khoản MXH đã liên kết của một Workspace
-   * Fallback: nếu workspaceId không tồn tại trong DB, trả về tất cả accounts (demo mode)
+   * Lấy danh sách các tài khoản MXH đã liên kết
    */
   async getAccounts(workspaceId: string): Promise<any[]> {
-    // Check if workspace exists
     const workspace = await this.prisma.workspace.findUnique({
       where: { id: workspaceId },
     });
-
     const whereClause = workspace ? { workspaceId } : {};
 
     return this.prisma.socialAccount.findMany({
@@ -36,529 +45,576 @@ export class SocialAuthService {
         avatarUrl: true,
         status: true,
         createdAt: true,
-      }
+      },
     });
   }
 
   /**
-   * Tạo URL chuyển hướng đăng nhập OAuth tương ứng cho từng Platform
+   * Tạo URL chuyển hướng OAuth — sử dụng Provider thật hoặc Mock
    */
-  getAuthRedirectUrl(platform: Platform, workspaceId: string): string {
-    const state = workspaceId; // State dùng để bảo vệ CSRF và truyền workspaceId qua callback
+  async getAuthRedirectUrl(platform: Platform, workspaceId: string): Promise<string> {
+    // Cleanup expired PKCE entries
+    this.cleanupExpiredPKCE();
 
-    if (platform === 'facebook') {
-      const clientId = process.env.FACEBOOK_CLIENT_ID || 'mock_facebook_client_id';
-      const redirectUri = process.env.FACEBOOK_REDIRECT_URI || 'http://localhost:3001/social-auth/callback/facebook';
-      const scope = 'pages_show_list,pages_read_engagement,pages_manage_posts,public_profile';
+    // Try to get real credentials
+    const credentials = await this.credentialsService.getCredentials(workspaceId, platform);
 
-      // Nếu đang dùng mock client id, chuyển hướng sang Mock OAuth page giả lập
-      if (clientId.startsWith('mock_')) {
-        return `http://localhost:3005/auth/mock-oauth?platform=facebook&state=${state}`;
+    if (credentials) {
+      // ✅ REAL OAUTH — redirect tới platform thật
+      const provider = this.providerManager.getProvider(platform);
+
+      // TikTok cần PKCE — tạo code_verifier và lưu vào memory
+      if (platform === Platform.tiktok && provider instanceof TikTokProvider) {
+        const { url, codeVerifier } = provider.generateAuthUrlWithPKCE(credentials, workspaceId);
+        
+        // Lưu code_verifier theo state (= workspaceId) để dùng khi callback
+        this.pkceStore.set(workspaceId, { codeVerifier, createdAt: Date.now() });
+        this.logger.log(`🔗 [TikTok] Auth URL generated with PKCE. code_verifier stored for state=${workspaceId}`);
+        
+        return url;
       }
 
-      return `https://www.facebook.com/v22.0/dialog/oauth?client_id=${clientId}&redirect_uri=${encodeURIComponent(
-        redirectUri
-      )}&scope=${scope}&state=${state}&response_type=code`;
+      // Các platform khác (Facebook, YouTube) — không cần PKCE
+      const url = provider.generateAuthUrl(credentials, workspaceId);
+      this.logger.log(`🔗 [${platform}] Real OAuth URL generated → redirect tới ${platform}.com`);
+      return url;
     }
 
-    if (platform === 'youtube') {
-      const clientId = process.env.GOOGLE_CLIENT_ID || 'mock_google_client_id';
-      const redirectUri = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3001/social-auth/callback/youtube';
-      const scope = 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly';
-
-      if (clientId.startsWith('mock_')) {
-        return `http://localhost:3005/auth/mock-oauth?platform=youtube&state=${state}`;
-      }
-
-      return `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(
-        redirectUri
-      )}&scope=${encodeURIComponent(
-        scope
-      )}&state=${state}&response_type=code&access_type=offline&prompt=consent`;
-    }
-
-    if (platform === 'tiktok') {
-      const clientKey = process.env.TIKTOK_CLIENT_KEY || 'mock_tiktok_client_key';
-      const redirectUri = process.env.TIKTOK_REDIRECT_URI || 'http://localhost:3001/social-auth/callback/tiktok';
-      const scope = 'user.info.basic,video.upload,video.publish';
-
-      if (clientKey.startsWith('mock_')) {
-        return `http://localhost:3005/auth/mock-oauth?platform=tiktok&state=${state}`;
-      }
-
-      return `https://www.tiktok.com/v2/auth/authorize/?client_key=${clientKey}&redirect_uri=${encodeURIComponent(
-        redirectUri
-      )}&scope=${scope}&state=${state}&response_type=code`;
-    }
-
-    throw new Error(`Nền tảng ${platform} không hỗ trợ đăng nhập OAuth 2.0`);
+    // ⚠️ MOCK FALLBACK — chưa cấu hình credentials
+    this.logger.warn(`⚠️ [${platform}] Chưa cấu hình API credentials. Sử dụng Mock OAuth.`);
+    return `http://localhost:3005/auth/mock-oauth?platform=${platform}&state=${workspaceId}`;
   }
 
   /**
-   * Xử lý trao đổi Code lấy Token sau khi người dùng xác thực thành công
+   * Xử lý OAuth callback — sử dụng Provider thật hoặc Mock
    */
   async handleOAuthCallback(platform: Platform, code: string, workspaceId: string): Promise<any[]> {
-    this.logger.log(`🔗 Đang xử lý OAuth callback cho platform: ${platform}, workspace: ${workspaceId}`);
+    this.logger.log(`🔗 OAuth callback: platform=${platform}, workspace=${workspaceId}`);
 
-    // MOCK OAUTH EXCHANGE FLOW
-    if (code.startsWith('mock_code_') || process.env.NODE_ENV === 'test') {
-      this.logger.log(`[MOCK] Thực hiện trao đổi Mock Code lấy Mock Tokens cho ${platform}...`);
+    // MOCK FLOW
+    if (code.startsWith('mock_code_')) {
+      return this.handleMockCallback(platform, workspaceId);
+    }
 
-      // Ensure a valid workspace exists — auto-create demo user + workspace if needed
-      let validWorkspaceId = workspaceId;
-      const existingWorkspace = await this.prisma.workspace.findUnique({
-        where: { id: workspaceId },
-      });
+    // REAL OAUTH FLOW — sử dụng Provider
+    const credentials = await this.credentialsService.getCredentials(workspaceId, platform);
+    if (!credentials) {
+      throw new Error(`Không tìm thấy API credentials cho ${platform}. Vui lòng cấu hình trong Settings.`);
+    }
 
-      if (!existingWorkspace) {
-        this.logger.log(`[MOCK] Workspace "${workspaceId}" không tồn tại. Đang tạo Demo workspace...`);
+    // Ensure workspace exists
+    const validWorkspaceId = await this.ensureWorkspace(workspaceId);
 
-        // Find or create a demo user
-        let demoUser = await this.prisma.user.findUnique({
-          where: { email: 'demo@autopost.local' },
-        });
+    const provider = this.providerManager.getProvider(platform);
 
-        if (!demoUser) {
-          const bcrypt = await import('bcrypt');
-          const hashedPassword = await bcrypt.hash('demo123456', 10);
-          demoUser = await this.prisma.user.create({
-            data: {
-              email: 'demo@autopost.local',
-              password: hashedPassword,
-              name: 'Demo User',
-            },
-          });
-          this.logger.log(`[MOCK] Đã tạo Demo User: ${demoUser.email}`);
-        }
-
-        // Create workspace owned by demo user
-        const demoWorkspace = await this.prisma.workspace.create({
-          data: {
-            name: 'Demo Workspace',
-            ownerId: demoUser.id,
-          },
-        });
-
-        // Add team member
-        await this.prisma.teamMember.create({
-          data: {
-            workspaceId: demoWorkspace.id,
-            userId: demoUser.id,
-            role: 'owner',
-          },
-        });
-
-        validWorkspaceId = demoWorkspace.id;
-        this.logger.log(`[MOCK] ✅ Demo Workspace "${demoWorkspace.id}" đã sẵn sàng.`);
+    // TikTok: Retrieve stored PKCE code_verifier
+    let result;
+    if (platform === Platform.tiktok && provider instanceof TikTokProvider) {
+      const pkceEntry = this.pkceStore.get(workspaceId);
+      if (!pkceEntry) {
+        this.logger.error(`❌ [TikTok] Không tìm thấy PKCE code_verifier cho state=${workspaceId}. Có thể đã hết hạn.`);
+        throw new Error('Phiên xác thực TikTok đã hết hạn (PKCE). Vui lòng thử kết nối lại.');
       }
-      
-      const mockAccountId = `mock_acc_${platform}_${Date.now()}`;
-      const mockDisplayNames: Record<string, string> = {
-        facebook: 'AutoPost Facebook Page',
-        youtube: 'AutoPost YouTube Channel',
-        tiktok: 'AutoPost TikTok Creator',
-      };
-      const mockUsernames: Record<string, string> = {
-        facebook: '@autopost.fb',
-        youtube: '@autopost_yt',
-        tiktok: '@autopost.tiktok',
-      };
-      const mockAvatars: Record<string, string> = {
-        facebook: 'https://ui-avatars.com/api/?name=FB&background=1877F2&color=fff&size=150',
-        youtube: 'https://ui-avatars.com/api/?name=YT&background=FF0000&color=fff&size=150',
-        tiktok: 'https://ui-avatars.com/api/?name=TT&background=00F2EA&color=000&size=150',
-      };
 
-      const displayName = mockDisplayNames[platform] || `Mock ${platform} User`;
-      const username = mockUsernames[platform] || `@mock_${platform}`;
-      const avatarUrl = mockAvatars[platform] || 'https://ui-avatars.com/api/?name=AP&size=150';
-      const encryptedAccessToken = this.crypto.encrypt(`mock_access_token_${Date.now()}`);
-      const encryptedRefreshToken = this.crypto.encrypt(`mock_refresh_token_${Date.now()}`);
+      this.logger.log(`[TikTok] Retrieved PKCE code_verifier for state=${workspaceId}`);
+      
+      // Exchange code với code_verifier
+      result = await provider.authenticate(code, credentials, pkceEntry.codeVerifier);
+      
+      // Xóa code_verifier sau khi dùng (one-time use)
+      this.pkceStore.delete(workspaceId);
+    } else {
+      // Facebook, YouTube — không cần PKCE
+      result = await provider.authenticate(code, credentials);
+    }
+
+    this.logger.log(`✅ [${platform}] OAuth thành công. ${result.accounts.length} tài khoản được liên kết.`);
+
+    // Save all accounts to DB
+    const savedAccounts = [];
+    for (const account of result.accounts) {
+      const encryptedAccessToken = this.crypto.encrypt(account.accessToken);
+      const encryptedRefreshToken = account.refreshToken
+        ? this.crypto.encrypt(account.refreshToken)
+        : undefined;
 
       const socialAccount = await this.prisma.socialAccount.upsert({
         where: {
           platform_platformAccountId: {
             platform,
-            platformAccountId: mockAccountId,
+            platformAccountId: account.platformAccountId,
           },
         },
         update: {
-          displayName,
-          username,
-          avatarUrl,
+          displayName: account.displayName,
+          username: account.username,
+          avatarUrl: account.avatarUrl,
           accessToken: encryptedAccessToken,
           refreshToken: encryptedRefreshToken,
+          tokenExpiresAt: account.tokenExpiresAt,
           status: AccountStatus.active,
           workspaceId: validWorkspaceId,
         },
         create: {
           workspaceId: validWorkspaceId,
           platform,
-          platformAccountId: mockAccountId,
-          displayName,
-          username,
-          avatarUrl,
+          platformAccountId: account.platformAccountId,
+          displayName: account.displayName,
+          username: account.username,
+          avatarUrl: account.avatarUrl,
           accessToken: encryptedAccessToken,
           refreshToken: encryptedRefreshToken,
+          tokenExpiresAt: account.tokenExpiresAt,
           status: AccountStatus.active,
         },
       });
 
-      return [socialAccount];
+      savedAccounts.push(socialAccount);
     }
 
-    // REAL OAUTH EXCHANGE FLOWS
-    if (platform === 'facebook') {
-      return this.handleFacebookOAuth(code, workspaceId);
-    }
-    if (platform === 'youtube') {
-      return this.handleYouTubeOAuth(code, workspaceId);
-    }
-    if (platform === 'tiktok') {
-      return this.handleTikTokOAuth(code, workspaceId);
-    }
-
-    return [];
+    return savedAccounts;
   }
 
   /**
-   * Xử lý trao đổi Token & lấy Pages cho Facebook
-   */
-  private async handleFacebookOAuth(code: string, workspaceId: string): Promise<any[]> {
-    const clientId = process.env.FACEBOOK_CLIENT_ID;
-    const clientSecret = process.env.FACEBOOK_CLIENT_SECRET;
-    const redirectUri = process.env.FACEBOOK_REDIRECT_URI;
-
-    // 1. Trao đổi Auth Code lấy Short-Lived User Access Token
-    const tokenResponse = await axios.get('https://graph.facebook.com/v22.0/oauth/access_token', {
-      params: {
-        client_id: clientId,
-        client_secret: clientSecret,
-        redirect_uri: redirectUri,
-        code,
-      },
-    });
-
-    const shortLivedToken = tokenResponse.data.access_token;
-
-    // 2. Trao đổi User Token ngắn hạn lấy User Token dài hạn (60 ngày)
-    const longLivedUserResponse = await axios.get('https://graph.facebook.com/v22.0/oauth/access_token', {
-      params: {
-        grant_type: 'fb_exchange_token',
-        client_id: clientId,
-        client_secret: clientSecret,
-        fb_exchange_token: shortLivedToken,
-      },
-    });
-
-    const longLivedUserToken = longLivedUserResponse.data.access_token;
-
-    // 3. Lấy danh sách Facebook Pages quản lý bởi User (Mỗi Page trả về Long-Lived Page Access Token "Never Expires")
-    const pagesResponse = await axios.get('https://graph.facebook.com/v22.0/me/accounts', {
-      params: { access_token: longLivedUserToken },
-    });
-
-    const pages = pagesResponse.data.data || [];
-    const connectedAccounts = [];
-
-    for (const page of pages) {
-      const encryptedAccessToken = this.crypto.encrypt(page.access_token);
-      
-      const socialAccount = await this.prisma.socialAccount.upsert({
-        where: {
-          platform_platformAccountId: {
-            platform: Platform.facebook,
-            platformAccountId: page.id,
-          },
-        },
-        update: {
-          displayName: page.name,
-          username: `@fbpage_${page.id}`,
-          avatarUrl: `https://graph.facebook.com/v22.0/${page.id}/picture?type=normal`,
-          accessToken: encryptedAccessToken,
-          status: AccountStatus.active,
-          workspaceId,
-        },
-        create: {
-          workspaceId,
-          platform: Platform.facebook,
-          platformAccountId: page.id,
-          displayName: page.name,
-          username: `@fbpage_${page.id}`,
-          avatarUrl: `https://graph.facebook.com/v22.0/${page.id}/picture?type=normal`,
-          accessToken: encryptedAccessToken,
-          status: AccountStatus.active,
-        },
-      });
-
-      connectedAccounts.push(socialAccount);
-    }
-
-    return connectedAccounts;
-  }
-
-  /**
-   * Xử lý trao đổi Token & lấy Channel cho Google/YouTube
-   */
-  private async handleYouTubeOAuth(code: string, workspaceId: string): Promise<any[]> {
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-    const redirectUri = process.env.GOOGLE_REDIRECT_URI;
-
-    // 1. Trao đổi Auth Code lấy Access Token và Refresh Token dài hạn
-    const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', {
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: redirectUri,
-      code,
-      grant_type: 'authorization_code',
-    });
-
-    const { access_token, refresh_token, expires_in } = tokenResponse.data;
-    const tokenExpiresAt = new Date(Date.now() + expires_in * 1000);
-
-    // 2. Fetch thông tin YouTube Channel của người dùng
-    const channelResponse = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
-      params: {
-        part: 'snippet',
-        mine: true,
-      },
-      headers: {
-        Authorization: `Bearer ${access_token}`,
-      },
-    });
-
-    const channel = channelResponse.data.items?.[0];
-    if (!channel) {
-      throw new Error('Không tìm thấy kênh YouTube tương ứng với tài khoản Google này.');
-    }
-
-    const encryptedAccessToken = this.crypto.encrypt(access_token);
-    const encryptedRefreshToken = refresh_token ? this.crypto.encrypt(refresh_token) : undefined;
-
-    const socialAccount = await this.prisma.socialAccount.upsert({
-      where: {
-        platform_platformAccountId: {
-          platform: Platform.youtube,
-          platformAccountId: channel.id,
-        },
-      },
-      update: {
-        displayName: channel.snippet.title,
-        username: channel.snippet.customUrl || `@yt_${channel.id}`,
-        avatarUrl: channel.snippet.thumbnails?.default?.url,
-        accessToken: encryptedAccessToken,
-        refreshToken: encryptedRefreshToken || undefined,
-        tokenExpiresAt,
-        status: AccountStatus.active,
-        workspaceId,
-      },
-      create: {
-        workspaceId,
-        platform: Platform.youtube,
-        platformAccountId: channel.id,
-        displayName: channel.snippet.title,
-        username: channel.snippet.customUrl || `@yt_${channel.id}`,
-        avatarUrl: channel.snippet.thumbnails?.default?.url,
-        accessToken: encryptedAccessToken,
-        refreshToken: encryptedRefreshToken,
-        tokenExpiresAt,
-        status: AccountStatus.active,
-      },
-    });
-
-    return [socialAccount];
-  }
-
-  /**
-   * Xử lý trao đổi Token & lấy User Profile cho TikTok
-   */
-  private async handleTikTokOAuth(code: string, workspaceId: string): Promise<any[]> {
-    const clientKey = process.env.TIKTOK_CLIENT_KEY;
-    const clientSecret = process.env.TIKTOK_CLIENT_SECRET;
-    const redirectUri = process.env.TIKTOK_REDIRECT_URI;
-
-    // 1. Trao đổi Auth Code lấy Access Token TikTok
-    const tokenResponse = await axios.post(
-      'https://open.tiktokapis.com/v2/oauth/token/',
-      new URLSearchParams({
-        client_key: clientKey,
-        client_secret: clientSecret,
-        code,
-        grant_type: 'authorization_code',
-        redirect_uri: redirectUri,
-      }).toString(),
-      {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-      }
-    );
-
-    const { access_token, refresh_token, expires_in } = tokenResponse.data;
-    const tokenExpiresAt = new Date(Date.now() + expires_in * 1000);
-
-    // 2. Lấy TikTok User Profile info
-    const userProfileResponse = await axios.get('https://open.tiktokapis.com/v2/user/info/', {
-      headers: {
-        Authorization: `Bearer ${access_token}`,
-      },
-      params: {
-        fields: 'open_id,union_id,avatar_url,display_name,username',
-      },
-    });
-
-    const user = userProfileResponse.data.data?.user;
-    if (!user) {
-      throw new Error('Không thể tải thông tin profile người dùng từ TikTok API.');
-    }
-
-    const encryptedAccessToken = this.crypto.encrypt(access_token);
-    const encryptedRefreshToken = refresh_token ? this.crypto.encrypt(refresh_token) : undefined;
-
-    const socialAccount = await this.prisma.socialAccount.upsert({
-      where: {
-        platform_platformAccountId: {
-          platform: Platform.tiktok,
-          platformAccountId: user.open_id,
-        },
-      },
-      update: {
-        displayName: user.display_name || user.username,
-        username: `@${user.username}`,
-        avatarUrl: user.avatar_url,
-        accessToken: encryptedAccessToken,
-        refreshToken: encryptedRefreshToken || undefined,
-        tokenExpiresAt,
-        status: AccountStatus.active,
-        workspaceId,
-      },
-      create: {
-        workspaceId,
-        platform: Platform.tiktok,
-        platformAccountId: user.open_id,
-        displayName: user.display_name || user.username,
-        username: `@${user.username}`,
-        avatarUrl: user.avatar_url,
-        accessToken: encryptedAccessToken,
-        refreshToken: encryptedRefreshToken,
-        tokenExpiresAt,
-        status: AccountStatus.active,
-      },
-    });
-
-    return [socialAccount];
-  }
-
-  /**
-   * Refresh token cho một tài khoản cụ thể
+   * Refresh token cho một tài khoản — sử dụng Provider
    */
   async refreshAccountToken(socialAccountId: string): Promise<string> {
     const acc = await this.prisma.socialAccount.findUnique({
-      where: { id: socialAccountId }
+      where: { id: socialAccountId },
     });
     if (!acc) throw new Error(`Social account not found: ${socialAccountId}`);
     if (!acc.refreshToken) return this.crypto.decrypt(acc.accessToken);
 
     const decryptedRefreshToken = this.crypto.decrypt(acc.refreshToken);
 
-    let newAccessToken = '';
-    let newRefreshToken = acc.refreshToken;
-    let expiresIn = 3600;
-
-    try {
-      if (acc.platform === 'youtube') {
-        const response = await axios.post('https://oauth2.googleapis.com/token', {
-          client_id: process.env.GOOGLE_CLIENT_ID || 'mock_google_client_id',
-          client_secret: process.env.GOOGLE_CLIENT_SECRET || 'mock_google_client_secret',
-          refresh_token: decryptedRefreshToken,
-          grant_type: 'refresh_token'
-        });
-        
-        newAccessToken = response.data.access_token;
-        expiresIn = response.data.expires_in;
-        if (response.data.refresh_token) {
-          newRefreshToken = this.crypto.encrypt(response.data.refresh_token);
-        }
-      } else if (acc.platform === 'tiktok') {
-        const response = await axios.post(
-          'https://open.tiktokapis.com/v2/oauth/token/',
-          new URLSearchParams({
-            client_key: process.env.TIKTOK_CLIENT_KEY || 'mock_tiktok_client_key',
-            client_secret: process.env.TIKTOK_CLIENT_SECRET || 'mock_tiktok_client_secret',
-            grant_type: 'refresh_token',
-            refresh_token: decryptedRefreshToken
-          }).toString(),
-          {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-          }
-        );
-
-        newAccessToken = response.data.access_token;
-        expiresIn = response.data.expires_in;
-        if (response.data.refresh_token) {
-          newRefreshToken = this.crypto.encrypt(response.data.refresh_token);
-        }
-      } else {
-        return this.crypto.decrypt(acc.accessToken);
-      }
-
-      if (newAccessToken) {
-        const encryptedAccessToken = this.crypto.encrypt(newAccessToken);
-        const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
-
-        await this.prisma.socialAccount.update({
-          where: { id: socialAccountId },
-          data: {
-            accessToken: encryptedAccessToken,
-            refreshToken: newRefreshToken,
-            tokenExpiresAt,
-            status: AccountStatus.active
-          }
-        });
-
-        this.logger.log(`✅ [refreshAccountToken] Refresh thành công token cho ${acc.displayName} (${acc.platform}).`);
-        return newAccessToken;
-      }
-    } catch (err: any) {
-      this.logger.error(`❌ [refreshAccountToken] Refresh thất bại cho ${acc.displayName} (${acc.platform}): ${err.message}`);
-      if (decryptedRefreshToken.startsWith('mock_')) {
-        return this.crypto.decrypt(acc.accessToken);
-      }
-      throw err;
+    // Skip refresh for mock tokens
+    if (decryptedRefreshToken.startsWith('mock_')) {
+      return this.crypto.decrypt(acc.accessToken);
     }
 
-    return this.crypto.decrypt(acc.accessToken);
+    // Get credentials for this platform
+    const credentials = await this.credentialsService.getCredentials(acc.workspaceId, acc.platform);
+    if (!credentials) {
+      this.logger.warn(`[refreshToken] No credentials for ${acc.platform}. Returning existing token.`);
+      return this.crypto.decrypt(acc.accessToken);
+    }
+
+    try {
+      const provider = this.providerManager.getProvider(acc.platform);
+      const result = await provider.refreshToken(decryptedRefreshToken, credentials);
+
+      const encryptedAccessToken = this.crypto.encrypt(result.accessToken);
+      const tokenExpiresAt = new Date(Date.now() + result.expiresIn * 1000);
+
+      const updateData: any = {
+        accessToken: encryptedAccessToken,
+        tokenExpiresAt,
+        status: AccountStatus.active,
+      };
+
+      if (result.refreshToken) {
+        updateData.refreshToken = this.crypto.encrypt(result.refreshToken);
+      }
+
+      await this.prisma.socialAccount.update({
+        where: { id: socialAccountId },
+        data: updateData,
+      });
+
+      this.logger.log(`✅ Token refreshed for ${acc.displayName} (${acc.platform})`);
+      return result.accessToken;
+    } catch (err: any) {
+      this.logger.error(`❌ Token refresh failed for ${acc.displayName}: ${err.message}`);
+      throw err;
+    }
   }
 
   /**
-   * Quét và làm mới các token sắp hết hạn trong 24 giờ tới (dành cho Hourly Cron Job)
+   * Cron: Quét và refresh token sắp hết hạn trong 24h tới
    */
   async refreshExpiringTokens(): Promise<number> {
     const twentyFourHours = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const expiringAccounts = await this.prisma.socialAccount.findMany({
       where: {
-        tokenExpiresAt: {
-          lte: twentyFourHours
-        },
-        refreshToken: {
-          not: null
-        }
-      }
+        tokenExpiresAt: { lte: twentyFourHours },
+        refreshToken: { not: null },
+      },
     });
 
-    this.logger.log(`⏳ [Early Refresh Cron] Phát hiện ${expiringAccounts.length} tài khoản sắp hết hạn token trong 24h tới. Đang xử lý...`);
+    this.logger.log(`⏳ [Cron] ${expiringAccounts.length} tài khoản sắp hết hạn token.`);
 
     let successCount = 0;
     for (const acc of expiringAccounts) {
       try {
         await this.refreshAccountToken(acc.id);
         successCount++;
-      } catch (err) {
-        this.logger.error(`[Early Refresh Cron] Lỗi khi làm mới token của ${acc.displayName} (ID: ${acc.id})`);
+      } catch {
+        this.logger.error(`[Cron] Lỗi refresh token: ${acc.displayName} (${acc.id})`);
       }
     }
 
     return successCount;
+  }
+
+  /**
+   * Hủy kết nối một hoặc nhiều tài khoản MXH
+   */
+  async disconnectAccounts(ids: string[]): Promise<{ success: boolean; count: number }> {
+    if (!ids || ids.length === 0) {
+      return { success: true, count: 0 };
+    }
+
+    this.logger.log(`🔌 [Disconnect Accounts] Đang xóa ${ids.length} tài khoản MXH: [${ids.join(', ')}]`);
+    
+    const result = await this.prisma.socialAccount.deleteMany({
+      where: {
+        id: { in: ids },
+      },
+    });
+
+    this.logger.log(`✅ [Disconnect Accounts] Đã xóa thành công ${result.count} tài khoản.`);
+    return {
+      success: true,
+      count: result.count,
+    };
+  }
+
+  /**
+   * DIRECT CONNECT — Kết nối bằng App ID + Page Access Token trực tiếp
+   * 
+   * Flow đơn giản nhất cho ứng dụng Windows desktop:
+   * 1. User dán App ID + Page Access Token
+   * 2. Hệ thống gọi Graph API validate token → lấy thông tin Page
+   * 3. Lưu token (encrypted) → sẵn sàng đăng bài tự động
+   */
+  async directConnect(
+    platform: Platform,
+    appId: string,
+    accessToken: string,
+    workspaceId: string,
+  ): Promise<any> {
+    this.logger.log(`🔗 [Direct Connect] Platform=${platform}, AppID=${appId.slice(0, 6)}...`);
+
+    const validWorkspaceId = await this.ensureWorkspace(workspaceId);
+
+    if (platform === 'facebook') {
+      return this.directConnectFacebook(appId, accessToken, validWorkspaceId);
+    }
+    if (platform === 'youtube') {
+      return this.directConnectGeneric(platform, appId, accessToken, validWorkspaceId, 'YouTube Channel');
+    }
+    if (platform === 'tiktok') {
+      return this.directConnectGeneric(platform, appId, accessToken, validWorkspaceId, 'TikTok Account');
+    }
+
+    throw new Error(`Platform không hỗ trợ: ${platform}`);
+  }
+
+  /**
+   * Facebook Direct Connect — validate token bằng Graph API thật
+   */
+  private async directConnectFacebook(appId: string, accessToken: string, workspaceId: string) {
+    const axios = (await import('axios')).default;
+
+    // Step 1: Validate token — lấy thông tin Pages mà token có quyền truy cập
+    let pages: any[] = [];
+    let userInfo: any = null;
+
+    try {
+      // Thử lấy Pages (nếu là Page Access Token)
+      const pagesResponse = await axios.get('https://graph.facebook.com/v22.0/me/accounts', {
+        params: { access_token: accessToken, fields: 'id,name,access_token,picture{url}' },
+      });
+      pages = pagesResponse.data.data || [];
+    } catch {
+      // Nếu không lấy được pages, thử lấy info của chính token (có thể là Page Token trực tiếp)
+    }
+
+    // Lấy info của token holder
+    try {
+      const meResponse = await axios.get('https://graph.facebook.com/v22.0/me', {
+        params: { access_token: accessToken, fields: 'id,name,picture{url}' },
+      });
+      userInfo = meResponse.data;
+    } catch (err: any) {
+      const msg = err.response?.data?.error?.message || err.message;
+      throw new Error(`Token không hợp lệ! Facebook trả lỗi: ${msg}`);
+    }
+
+    this.logger.log(`✅ [Facebook] Token hợp lệ. User/Page: "${userInfo.name}" (ID: ${userInfo.id}). Pages found: ${pages.length}`);
+
+    // Nếu có Pages → lưu từng Page; nếu không → lưu token gốc (có thể là Page Token trực tiếp)
+    const savedAccounts = [];
+
+    if (pages.length > 0) {
+      for (const page of pages) {
+        const account = await this.prisma.socialAccount.upsert({
+          where: { platform_platformAccountId: { platform: 'facebook', platformAccountId: page.id } },
+          update: {
+            displayName: page.name,
+            username: `@fbpage_${page.id}`,
+            avatarUrl: page.picture?.data?.url || `https://graph.facebook.com/${page.id}/picture?type=normal`,
+            accessToken: this.crypto.encrypt(page.access_token),
+            status: 'active',
+            workspaceId,
+          },
+          create: {
+            workspaceId,
+            platform: 'facebook',
+            platformAccountId: page.id,
+            displayName: page.name,
+            username: `@fbpage_${page.id}`,
+            avatarUrl: page.picture?.data?.url || `https://graph.facebook.com/${page.id}/picture?type=normal`,
+            accessToken: this.crypto.encrypt(page.access_token),
+            status: 'active',
+          },
+        });
+        savedAccounts.push(account);
+      }
+    } else {
+      // Lưu chính token đã nhập (có thể là Page Access Token trực tiếp)
+      const account = await this.prisma.socialAccount.upsert({
+        where: { platform_platformAccountId: { platform: 'facebook', platformAccountId: userInfo.id } },
+        update: {
+          displayName: userInfo.name,
+          username: `@fb_${userInfo.id}`,
+          avatarUrl: userInfo.picture?.data?.url || `https://graph.facebook.com/${userInfo.id}/picture?type=normal`,
+          accessToken: this.crypto.encrypt(accessToken),
+          status: 'active',
+          workspaceId,
+        },
+        create: {
+          workspaceId,
+          platform: 'facebook',
+          platformAccountId: userInfo.id,
+          displayName: userInfo.name,
+          username: `@fb_${userInfo.id}`,
+          avatarUrl: userInfo.picture?.data?.url || `https://graph.facebook.com/${userInfo.id}/picture?type=normal`,
+          accessToken: this.crypto.encrypt(accessToken),
+          status: 'active',
+        },
+      });
+      savedAccounts.push(account);
+    }
+
+    // Lưu App ID vào credentials cho reference
+    await this.credentialsService.saveCredentials(workspaceId, {
+      platform: 'facebook',
+      clientId: appId,
+      clientSecret: 'direct_token_mode',
+    });
+
+    this.logger.log(`✅ [Facebook Direct Connect] Đã lưu ${savedAccounts.length} tài khoản. Sẵn sàng đăng bài!`);
+
+    return {
+      success: true,
+      message: `Kết nối thành công! ${savedAccounts.length} Facebook Page đã được liên kết.`,
+      accounts: savedAccounts.map(a => ({
+        id: a.id,
+        displayName: a.displayName,
+        username: a.username,
+        avatarUrl: a.avatarUrl,
+        platform: a.platform,
+        status: a.status,
+      })),
+    };
+  }
+
+  /**
+   * Generic Direct Connect for YouTube/TikTok
+   */
+  private async directConnectGeneric(
+    platform: Platform, appId: string, accessToken: string,
+    workspaceId: string, displayLabel: string,
+  ) {
+    const axios = (await import('axios')).default;
+    let platformAccountId = `direct_${platform}_${Date.now()}`;
+    let displayName = `${displayLabel} (Direct)`;
+    let username = `@${platform}_direct`;
+    let avatarUrl = `https://ui-avatars.com/api/?name=${platform.charAt(0).toUpperCase()}&background=6366f1&color=fff&size=150`;
+
+    if (!accessToken.startsWith('mock_')) {
+      try {
+        if (platform === 'youtube') {
+          this.logger.log(`[Direct Connect] Đang tải thông tin kênh YouTube từ API thật...`);
+          const channelResponse = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
+            params: { part: 'snippet,statistics', mine: true },
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          const channel = channelResponse.data.items?.[0];
+          if (channel) {
+            platformAccountId = channel.id;
+            displayName = channel.snippet.title;
+            username = channel.snippet.customUrl || `@yt_${channel.id}`;
+            avatarUrl = channel.snippet.thumbnails?.high?.url || channel.snippet.thumbnails?.default?.url || avatarUrl;
+            this.logger.log(`[Direct Connect] Lấy thông tin YouTube thành công: "${displayName}"`);
+          } else {
+            throw new Error('Tài khoản Google này không có kênh YouTube nào được tạo hoặc chưa kích hoạt!');
+          }
+        } else if (platform === 'tiktok') {
+          this.logger.log(`[Direct Connect] Đang tải thông tin TikTok từ API thật...`);
+          const response = await axios.get('https://open.tiktokapis.com/v2/user/info/', {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          const user = response.data.data?.user;
+          if (user) {
+            platformAccountId = user.open_id || user.union_id || platformAccountId;
+            displayName = user.display_name || displayName;
+            username = `@${user.username || 'tiktok_user'}`;
+            avatarUrl = user.avatar_url || avatarUrl;
+            this.logger.log(`[Direct Connect] Lấy thông tin TikTok thành công: "${displayName}"`);
+          } else {
+            throw new Error('Không tìm thấy thông tin người dùng TikTok!');
+          }
+        }
+      } catch (err: any) {
+        const errorData = err.response?.data ? JSON.stringify(err.response.data) : '';
+        this.logger.error(`❌ [Direct Connect] Lỗi khi lấy profile thật cho ${platform}: ${err.message} ${errorData}`);
+        this.logger.error(`Stack trace: ${err.stack}`);
+        const apiErrorMsg = err.response?.data?.error?.message || err.message;
+        throw new Error(`Lỗi kết nối ${platform}: ${apiErrorMsg}`);
+      }
+    }
+
+    const account = await this.prisma.socialAccount.upsert({
+      where: { platform_platformAccountId: { platform, platformAccountId } },
+      update: {
+        displayName,
+        username,
+        avatarUrl,
+        accessToken: this.crypto.encrypt(accessToken),
+        status: 'active',
+        workspaceId,
+      },
+      create: {
+        workspaceId,
+        platform,
+        platformAccountId,
+        displayName,
+        username,
+        avatarUrl,
+        accessToken: this.crypto.encrypt(accessToken),
+        status: 'active',
+      },
+    });
+
+    // Lưu App ID / Client ID vào credentials làm tham chiếu
+    try {
+      await this.credentialsService.saveCredentials(workspaceId, {
+        platform,
+        clientId: appId,
+        clientSecret: 'direct_token_mode',
+      });
+    } catch (e: any) {
+      this.logger.warn(`⚠️ [Direct Connect] Không thể lưu credentials tham chiếu: ${e.message}`);
+    }
+
+    return {
+      success: true,
+      message: `Kết nối ${displayLabel} thành công!`,
+      accounts: [{ id: account.id, displayName: account.displayName, username: account.username, avatarUrl: account.avatarUrl, platform, status: 'active' }],
+    };
+  }
+
+  // ================================================================
+  // PRIVATE HELPERS
+  // ================================================================
+
+  /**
+   * Mock OAuth callback — tạo demo account khi chưa có credentials thật
+   */
+  private async handleMockCallback(platform: Platform, workspaceId: string): Promise<any[]> {
+    this.logger.log(`[MOCK] Mock OAuth cho ${platform}...`);
+
+    const validWorkspaceId = await this.ensureWorkspace(workspaceId);
+
+    const mockAccountId = `mock_acc_${platform}_${Date.now()}`;
+    const mockInfo: Record<string, { name: string; user: string; avatar: string }> = {
+      facebook: { name: 'AutoPost Facebook Page', user: '@autopost.fb', avatar: 'https://ui-avatars.com/api/?name=FB&background=1877F2&color=fff&size=150' },
+      youtube: { name: 'AutoPost YouTube Channel', user: '@autopost_yt', avatar: 'https://ui-avatars.com/api/?name=YT&background=FF0000&color=fff&size=150' },
+      tiktok: { name: 'AutoPost TikTok Creator', user: '@autopost.tiktok', avatar: 'https://ui-avatars.com/api/?name=TT&background=00F2EA&color=000&size=150' },
+    };
+
+    const info = mockInfo[platform] || { name: `Mock ${platform}`, user: `@mock_${platform}`, avatar: '' };
+
+    const socialAccount = await this.prisma.socialAccount.upsert({
+      where: {
+        platform_platformAccountId: { platform, platformAccountId: mockAccountId },
+      },
+      update: {
+        displayName: info.name,
+        username: info.user,
+        avatarUrl: info.avatar,
+        accessToken: this.crypto.encrypt(`mock_access_token_${Date.now()}`),
+        refreshToken: this.crypto.encrypt(`mock_refresh_token_${Date.now()}`),
+        status: AccountStatus.active,
+        workspaceId: validWorkspaceId,
+      },
+      create: {
+        workspaceId: validWorkspaceId,
+        platform,
+        platformAccountId: mockAccountId,
+        displayName: info.name,
+        username: info.user,
+        avatarUrl: info.avatar,
+        accessToken: this.crypto.encrypt(`mock_access_token_${Date.now()}`),
+        refreshToken: this.crypto.encrypt(`mock_refresh_token_${Date.now()}`),
+        status: AccountStatus.active,
+      },
+    });
+
+    return [socialAccount];
+  }
+
+  /**
+   * Đảm bảo workspace tồn tại — tạo demo workspace nếu cần
+   */
+  private async ensureWorkspace(workspaceId: string): Promise<string> {
+    const existing = await this.prisma.workspace.findUnique({
+      where: { id: workspaceId },
+    });
+
+    if (existing) return workspaceId;
+
+    this.logger.log(`[ensureWorkspace] Tạo Demo workspace...`);
+
+    let demoUser = await this.prisma.user.findUnique({
+      where: { email: 'demo@autopost.local' },
+    });
+
+    if (!demoUser) {
+      const bcrypt = await import('bcrypt');
+      const hashedPassword = await bcrypt.hash('demo123456', 10);
+      demoUser = await this.prisma.user.create({
+        data: { email: 'demo@autopost.local', password: hashedPassword, name: 'Demo User' },
+      });
+    }
+
+    const workspace = await this.prisma.workspace.create({
+      data: { name: 'Demo Workspace', ownerId: demoUser.id },
+    });
+
+    await this.prisma.teamMember.create({
+      data: { workspaceId: workspace.id, userId: demoUser.id, role: 'owner' },
+    });
+
+    return workspace.id;
+  }
+
+  /**
+   * Cleanup PKCE entries quá hạn (> 10 phút)
+   */
+  private cleanupExpiredPKCE(): void {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [key, entry] of this.pkceStore.entries()) {
+      if (now - entry.createdAt > this.PKCE_TTL_MS) {
+        this.pkceStore.delete(key);
+        cleaned++;
+      }
+    }
+    if (cleaned > 0) {
+      this.logger.debug(`[PKCE Cleanup] Đã xóa ${cleaned} entries hết hạn.`);
+    }
   }
 }

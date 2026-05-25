@@ -26,6 +26,15 @@ export class AuthController {
     return this.authService.login(dto);
   }
 
+  @Post('supabase-sync')
+  @ApiOperation({ summary: 'Đồng bộ tài khoản Supabase và phát hành Local JWT' })
+  @ApiResponse({ status: 200, description: 'Đồng bộ và đăng nhập thành công' })
+  async supabaseSync(
+    @Body() dto: { email: string; name: string; supabaseToken: string },
+  ) {
+    return this.authService.syncSupabaseUser(dto.email, dto.name, dto.supabaseToken);
+  }
+
   @Get('me')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)

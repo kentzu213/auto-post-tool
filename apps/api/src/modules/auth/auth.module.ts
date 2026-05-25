@@ -9,7 +9,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
   imports: [
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.register({
-      secret: process.env.JWT_SECRET || 'yoursuperjwtsecretkeyforproductiondevelopmentchangeit',
+      secret: process.env.JWT_SECRET || (() => { throw new Error('JWT_SECRET environment variable is required'); })(),
       signOptions: { expiresIn: '1d' }, // Access Token có hạn 1 ngày
     }),
   ],

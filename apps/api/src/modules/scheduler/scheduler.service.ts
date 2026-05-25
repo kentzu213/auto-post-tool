@@ -37,7 +37,7 @@ export class SchedulerService implements OnModuleInit {
       { scheduleId },
       {
         delay,
-        jobId: `schedule:${scheduleId}`, // Idempotency: BullMQ tự động loại bỏ duplicate nếu jobId đã tồn tại trên Redis
+        jobId: `schedule_${scheduleId}`, // Idempotency: BullMQ tự động loại bỏ duplicate nếu jobId đã tồn tại trên Redis
         priority, // Hỗ trợ hàng đợi ưu tiên (1 = Cao nhất, 10 = Mặc định)
         attempts: 5,
         backoff: {

@@ -85,10 +85,11 @@ class ApiClient {
     return this.request<T>(path, { method: 'GET', params });
   }
 
-  async post<T>(path: string, body?: unknown): Promise<T> {
+  async post<T>(path: string, body?: unknown, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
     return this.request<T>(path, {
       method: 'POST',
       body: body ? JSON.stringify(body) : undefined,
+      params,
     });
   }
 
@@ -99,8 +100,39 @@ class ApiClient {
     });
   }
 
-  async delete<T>(path: string): Promise<T> {
-    return this.request<T>(path, { method: 'DELETE' });
+  async delete<T>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
+    return this.request<T>(path, { method: 'DELETE', params });
+  }
+
+  async upload<T>(path: string, formData: FormData): Promise<T> {
+    const url = this.buildUrl(path);
+    const token = this.getToken();
+
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      body: formData,
+      headers,
+    });
+
+    if (response.status === 401) {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('auth_token');
+        window.location.href = '/login';
+      }
+      throw new Error('Unauthorized — session expired');
+    }
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.message || `API Error: ${response.status}`);
+    }
+
+    return response.json();
   }
 }
 

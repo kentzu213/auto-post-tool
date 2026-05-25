@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { SocialAbstract } from './social.abstract';
 import { PublishResult } from '../interfaces/publisher.interface';
 import axios from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class FacebookPublisher extends SocialAbstract {
@@ -70,15 +72,22 @@ export class FacebookPublisher extends SocialAbstract {
 
       return await this.executeResiliently('facebook', async () => {
         // 1. Trường hợp đăng Video thường (Feed Video)
-        const isVideo = mediaUrls.length > 0 && mediaUrls[0].match(/\.(mp4|mov|avi)$/i);
+        const isVideo = mediaUrls.length > 0 && mediaUrls[0].match(/\.(mp4|mov|avi|webm)$/i);
         if (isVideo) {
           this.abstractLogger.log(`Đăng Video lên Facebook Page ${pageId}...`);
-          const response = await axios.post(`${this.baseUrl}/${pageId}/videos`, {
-            description: content,
-            file_url: mediaUrls[0],
-            access_token: accessToken,
-          });
+          const formData = new FormData();
+          formData.append('description', content);
+          formData.append('access_token', accessToken);
 
+          if (mediaUrls[0].startsWith('http://localhost') || mediaUrls[0].includes('/uploads/')) {
+            this.abstractLogger.log(`Tải video cục bộ & upload nhị phân trực tiếp lên Facebook...`);
+            const blob = await this.getBlobFromUrl(mediaUrls[0]);
+            formData.append('source', blob, 'video.mp4');
+          } else {
+            formData.append('file_url', mediaUrls[0]);
+          }
+
+          const response = await axios.post(`${this.baseUrl}/${pageId}/videos`, formData);
           this.checkBUCRateLimit(response.headers);
 
           return {
@@ -91,12 +100,19 @@ export class FacebookPublisher extends SocialAbstract {
         // 2. Trường hợp đăng ảnh đơn (Single Photo)
         if (mediaUrls.length === 1) {
           this.abstractLogger.log(`Đăng ảnh đơn lên Facebook Page ${pageId}...`);
-          const response = await axios.post(`${this.baseUrl}/${pageId}/photos`, {
-            caption: content,
-            url: mediaUrls[0],
-            access_token: accessToken,
-          });
+          const formData = new FormData();
+          formData.append('caption', content);
+          formData.append('access_token', accessToken);
 
+          if (mediaUrls[0].startsWith('http://localhost') || mediaUrls[0].includes('/uploads/')) {
+            this.abstractLogger.log(`Tải ảnh cục bộ & upload nhị phân trực tiếp lên Facebook...`);
+            const blob = await this.getBlobFromUrl(mediaUrls[0]);
+            formData.append('source', blob, 'photo.jpg');
+          } else {
+            formData.append('url', mediaUrls[0]);
+          }
+
+          const response = await axios.post(`${this.baseUrl}/${pageId}/photos`, formData);
           this.checkBUCRateLimit(response.headers);
 
           return {
@@ -113,11 +129,18 @@ export class FacebookPublisher extends SocialAbstract {
           // Bước A: Upload từng ảnh ở dạng ẩn (published=false) để lấy attachment IDs
           const attachedMediaIds: string[] = [];
           for (const url of mediaUrls.slice(0, 10)) { // Giới hạn max 10 ảnh theo Graph API
-            const uploadRes = await axios.post(`${this.baseUrl}/${pageId}/photos`, {
-              url,
-              published: false,
-              access_token: accessToken,
-            });
+            const formData = new FormData();
+            formData.append('published', 'false');
+            formData.append('access_token', accessToken);
+
+            if (url.startsWith('http://localhost') || url.includes('/uploads/')) {
+              const blob = await this.getBlobFromUrl(url);
+              formData.append('source', blob, 'photo.jpg');
+            } else {
+              formData.append('url', url);
+            }
+
+            const uploadRes = await axios.post(`${this.baseUrl}/${pageId}/photos`, formData);
             attachedMediaIds.push(uploadRes.data.id);
           }
 
@@ -239,21 +262,23 @@ export class FacebookPublisher extends SocialAbstract {
 
       this.abstractLogger.log(`📸 Đăng Story (${isVideo ? 'video' : 'photo'}) lên Facebook Page ${pageId}...`);
 
-      // Upload media ẩn trước
       let mediaId: string;
+      const formData = new FormData();
+      formData.append('published', 'false');
+      formData.append('access_token', accessToken);
+
+      if (mediaUrl.startsWith('http://localhost') || mediaUrl.includes('/uploads/')) {
+        const blob = await this.getBlobFromUrl(mediaUrl);
+        formData.append('source', blob, isVideo ? 'video.mp4' : 'photo.jpg');
+      } else {
+        formData.append(isVideo ? 'file_url' : 'url', mediaUrl);
+      }
+
       if (isVideo) {
-        const uploadRes = await axios.post(`${this.baseUrl}/${pageId}/videos`, {
-          file_url: mediaUrl,
-          published: false,
-          access_token: accessToken,
-        });
+        const uploadRes = await axios.post(`${this.baseUrl}/${pageId}/videos`, formData);
         mediaId = uploadRes.data.id;
       } else {
-        const uploadRes = await axios.post(`${this.baseUrl}/${pageId}/photos`, {
-          url: mediaUrl,
-          published: false,
-          access_token: accessToken,
-        });
+        const uploadRes = await axios.post(`${this.baseUrl}/${pageId}/photos`, formData);
         mediaId = uploadRes.data.id;
       }
 
@@ -384,5 +409,47 @@ export class FacebookPublisher extends SocialAbstract {
     } catch (e: any) {
       this.abstractLogger.error(`Lỗi phân tích BUC header: ${e.message}`);
     }
+  }
+
+  /**
+   * Tìm đường dẫn file cục bộ từ media URL
+   */
+  private getLocalFilePath(url: string): string | null {
+    if (!url.includes('/uploads/')) return null;
+    const filename = url.split('/uploads/').pop();
+    if (!filename) return null;
+
+    const pathsToTry = [
+      path.join(process.cwd(), 'uploads', filename), // API cwd
+      path.join(process.cwd(), '..', 'api', 'uploads', filename), // Worker cwd
+      path.resolve(__dirname, '..', '..', 'api', 'uploads', filename), // Built worker path 1
+      path.resolve(__dirname, '..', '..', '..', 'api', 'uploads', filename), // Built worker path 2
+      path.resolve(__dirname, '..', 'api', 'uploads', filename), // API built path
+      path.join('f:\\Ai Tools\\TOOL TỰ ĐỘNG ĐĂNG BÀI', 'apps', 'api', 'uploads', filename) // Ultimate hardcoded absolute path fallback
+    ];
+
+    for (const p of pathsToTry) {
+      if (fs.existsSync(p)) {
+        return p;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Tải nội dung file cục bộ và chuyển đổi thành Blob để upload nhị phân trực tiếp lên Facebook Graph API
+   */
+  private async getBlobFromUrl(url: string): Promise<Blob> {
+    const localPath = this.getLocalFilePath(url);
+    if (localPath) {
+      this.abstractLogger.log(`[Local Optimizer] Đọc trực tiếp file cục bộ tại: ${localPath}`);
+      const buffer = fs.readFileSync(localPath);
+      return new Blob([buffer]);
+    }
+
+    this.abstractLogger.log(`[HTTP Fetcher] Tải file từ xa: ${url}`);
+    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    const buffer = Buffer.from(response.data);
+    return new Blob([buffer]);
   }
 }

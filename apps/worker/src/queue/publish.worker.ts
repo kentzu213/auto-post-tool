@@ -2,6 +2,8 @@ import { Worker, Job } from 'bullmq';
 import { PrismaClient } from '@prisma/client';
 import IORedis from 'ioredis';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import axios from 'axios';
 import { 
   handleAll, 
@@ -291,24 +293,44 @@ export function startPublishWorker() {
 
           logger.log(`🎉 Đăng bài thành công lên [${platform.toUpperCase()}]! Post ID: ${publishResult.publishedPostId}`);
 
-          await prisma.auditLog.create({
-            data: {
-              userId: socialAccount.workspaceId,
-              action: 'publish_post_success',
-              details: `Đăng bài viết lên ${platform.toUpperCase()} thành công. ID bài viết: ${publishResult.publishedPostId}`,
-            },
-          });
+          // Audit log (non-blocking — should not crash the publish flow)
+          try {
+            const workspace = await prisma.workspace.findUnique({
+              where: { id: socialAccount.workspaceId },
+              select: { ownerId: true },
+            });
+            if (workspace?.ownerId) {
+              await prisma.auditLog.create({
+                data: {
+                  userId: workspace.ownerId,
+                  action: 'publish_post_success',
+                  details: `Đăng bài viết lên ${platform.toUpperCase()} thành công. ID bài viết: ${publishResult.publishedPostId}`,
+                },
+              });
+            }
+          } catch (auditErr: any) {
+            logger.warn(`⚠️ Audit log ghi thất bại (không ảnh hưởng đăng bài): ${auditErr.message}`);
+          }
         } else {
           throw new Error(publishResult.error || 'Lỗi không xác định khi đăng bài');
         }
       } catch (error: any) {
-        logger.error(`💥 Đăng bài lên [${platform.toUpperCase()}] thất bại: ${error.message}`);
+        let errorMsg = error.message;
+        if (error.response?.data?.error) {
+          const fbErr = error.response.data.error;
+          errorMsg = `[FB API Error ${fbErr.code}]: ${fbErr.message} (Type: ${fbErr.type})`;
+          logger.error(`[Facebook Detail] Error details: ${JSON.stringify(fbErr)}`);
+        } else if (error.response?.data) {
+          logger.error(`[API Response Error Data] ${JSON.stringify(error.response.data)}`);
+          errorMsg = `${error.message} - ${JSON.stringify(error.response.data)}`;
+        }
+        logger.error(`💥 Đăng bài lên [${platform.toUpperCase()}] thất bại: ${errorMsg}`);
         
         await prisma.schedule.update({
           where: { id: scheduleId },
           data: {
             status: 'failed',
-            errorLog: error.message,
+            errorLog: errorMsg,
           },
         });
 
@@ -336,6 +358,63 @@ export function startPublishWorker() {
 }
 
 /**
+ * Tìm đường dẫn file cục bộ từ media URL trong Worker
+ */
+function getLocalFilePath(url: string): string | null {
+  if (!url.includes('/uploads/')) return null;
+  const filename = url.split('/uploads/').pop();
+  if (!filename) return null;
+
+  const pathsToTry = [
+    path.join(process.cwd(), 'uploads', filename), // API cwd
+    path.join(process.cwd(), '..', 'api', 'uploads', filename), // Worker dev cwd
+    path.resolve(__dirname, '..', '..', 'api', 'uploads', filename), // Built worker path 1
+    path.resolve(__dirname, '..', '..', '..', 'api', 'uploads', filename), // Built worker path 2
+    path.resolve(__dirname, '..', 'api', 'uploads', filename), // API built path
+    path.join('f:\\Ai Tools\\TOOL TỰ ĐỘNG ĐĂNG BÀI', 'apps', 'api', 'uploads', filename) // Ultimate hardcoded absolute path fallback
+  ];
+
+  for (const p of pathsToTry) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+  return null;
+}
+
+/**
+ * Tải nội dung file cục bộ và chuyển đổi thành Blob để upload nhị phân trực tiếp lên Facebook Graph API từ Worker
+ */
+async function getBlobFromUrl(url: string): Promise<Blob> {
+  const localPath = getLocalFilePath(url);
+  if (localPath) {
+    logger.log(`[Local Optimizer] Đọc trực tiếp file cục bộ tại: ${localPath}`);
+    const buffer = fs.readFileSync(localPath);
+    return new Blob([buffer]);
+  }
+
+  logger.log(`[HTTP Fetcher] Tải file từ xa: ${url}`);
+  const response = await axios.get(url, { responseType: 'arraybuffer' });
+  const buffer = Buffer.from(response.data);
+  return new Blob([buffer]);
+}
+
+/**
+ * Tải nội dung file cục bộ và trả về Buffer (Hỗ trợ YouTube & TikTok từ Worker)
+ */
+async function getBufferFromUrl(url: string): Promise<Buffer> {
+  const localPath = getLocalFilePath(url);
+  if (localPath) {
+    logger.log(`[Local Optimizer] Đọc trực tiếp file cục bộ tại: ${localPath}`);
+    return fs.readFileSync(localPath);
+  }
+
+  logger.log(`[HTTP Fetcher] Tải file từ xa: ${url}`);
+  const response = await axios.get(url, { responseType: 'arraybuffer' });
+  return Buffer.from(response.data);
+}
+
+/**
  * Facebook Graph API helper
  */
 async function publishToFacebook(content: string, mediaUrls: string[], token: string, pageId: string) {
@@ -343,19 +422,30 @@ async function publishToFacebook(content: string, mediaUrls: string[], token: st
   let response;
 
   if (mediaUrls.length > 0) {
-    const isVideo = mediaUrls[0].match(/\.(mp4|mov|avi)$/i);
+    const isVideo = mediaUrls[0].match(/\.(mp4|mov|avi|webm)$/i);
+    const formData = new FormData();
+    formData.append('access_token', token);
+
     if (isVideo) {
-      response = await axios.post(`${baseUrl}/${pageId}/videos`, {
-        description: content,
-        file_url: mediaUrls[0],
-        access_token: token,
-      });
+      formData.append('description', content);
+      if (mediaUrls[0].startsWith('http://localhost') || mediaUrls[0].includes('/uploads/')) {
+        logger.log(`Tải video cục bộ & upload nhị phân trực tiếp lên Facebook...`);
+        const blob = await getBlobFromUrl(mediaUrls[0]);
+        formData.append('source', blob, 'video.mp4');
+      } else {
+        formData.append('file_url', mediaUrls[0]);
+      }
+      response = await axios.post(`${baseUrl}/${pageId}/videos`, formData);
     } else {
-      response = await axios.post(`${baseUrl}/${pageId}/photos`, {
-        caption: content,
-        url: mediaUrls[0],
-        access_token: token,
-      });
+      formData.append('caption', content);
+      if (mediaUrls[0].startsWith('http://localhost') || mediaUrls[0].includes('/uploads/')) {
+        logger.log(`Tải ảnh cục bộ & upload nhị phân trực tiếp lên Facebook...`);
+        const blob = await getBlobFromUrl(mediaUrls[0]);
+        formData.append('source', blob, 'photo.jpg');
+      } else {
+        formData.append('url', mediaUrls[0]);
+      }
+      response = await axios.post(`${baseUrl}/${pageId}/photos`, formData);
     }
   } else {
     response = await axios.post(`${baseUrl}/${pageId}/feed`, {
@@ -401,9 +491,8 @@ async function publishToYouTube(title: string, description: string, mediaUrls: s
         status: { privacyStatus: 'public', selfDeclaredMadeForKids: false },
       };
 
-      // BƯỚC 1: Download video binary từ URL (MinIO/S3/CDN)
-      const videoResponse = await axios.get(mediaUrls[0], { responseType: 'arraybuffer' });
-      const videoBuffer = Buffer.from(videoResponse.data);
+      // BƯỚC 1: Download video binary từ URL hoặc đọc trực tiếp từ ổ đĩa
+      const videoBuffer = await getBufferFromUrl(mediaUrls[0]);
       const videoSize = videoBuffer.byteLength;
       logger.log(`[Worker YouTube] Video size: ${(videoSize / 1024 / 1024).toFixed(2)} MB`);
 
@@ -497,11 +586,11 @@ async function publishToTikTok(content: string, mediaUrls: string[], token: stri
   const uploadUrl = resInit.data.data?.upload_url;
   const publishId = resInit.data.data?.publish_id;
 
-  const videoResponse = await axios.get(mediaUrls[0], { responseType: 'arraybuffer' });
-  await axios.put(uploadUrl, videoResponse.data, {
+  const videoBuffer = await getBufferFromUrl(mediaUrls[0]);
+  await axios.put(uploadUrl, videoBuffer, {
     headers: {
       'Content-Type': 'video/mp4',
-      'Content-Range': `bytes 0-${videoResponse.data.byteLength - 1}/${videoResponse.data.byteLength}`,
+      'Content-Range': `bytes 0-${videoBuffer.byteLength - 1}/${videoBuffer.byteLength}`,
     },
   });
 

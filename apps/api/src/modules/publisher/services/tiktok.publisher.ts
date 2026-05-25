@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { SocialAbstract } from './social.abstract';
 import { PublishResult } from '../interfaces/publisher.interface';
 import axios from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class TikTokPublisher extends SocialAbstract {
@@ -138,12 +140,12 @@ export class TikTokPublisher extends SocialAbstract {
         }
 
         this.abstractLogger.log(`Bước 2: Tải video lên TikTok Upload URL...`);
-        const videoResponse = await axios.get(videoUrl, { responseType: 'arraybuffer' });
+        const videoBuffer = await this.getBufferFromUrl(videoUrl);
 
-        await axios.put(uploadUrl, videoResponse.data, {
+        await axios.put(uploadUrl, videoBuffer, {
           headers: {
             'Content-Type': 'video/mp4',
-            'Content-Range': `bytes 0-${videoResponse.data.byteLength - 1}/${videoResponse.data.byteLength}`,
+            'Content-Range': `bytes 0-${videoBuffer.byteLength - 1}/${videoBuffer.byteLength}`,
           },
         });
 
@@ -208,5 +210,45 @@ export class TikTokPublisher extends SocialAbstract {
       this.abstractLogger.error(`Lấy insights video TikTok ${publishedPostId} thất bại: ${error.message}`);
       return {};
     }
+  }
+
+  /**
+   * Tìm đường dẫn file cục bộ từ media URL
+   */
+  private getLocalFilePath(url: string): string | null {
+    if (!url.includes('/uploads/')) return null;
+    const filename = url.split('/uploads/').pop();
+    if (!filename) return null;
+
+    const pathsToTry = [
+      path.join(process.cwd(), 'uploads', filename), // API cwd
+      path.join(process.cwd(), '..', 'api', 'uploads', filename), // Worker cwd
+      path.resolve(__dirname, '..', '..', 'api', 'uploads', filename), // Built worker path 1
+      path.resolve(__dirname, '..', '..', '..', 'api', 'uploads', filename), // Built worker path 2
+      path.resolve(__dirname, '..', 'api', 'uploads', filename), // API built path
+      path.join('f:\\Ai Tools\\TOOL TỰ ĐỘNG ĐĂNG BÀI', 'apps', 'api', 'uploads', filename) // Ultimate hardcoded absolute path fallback
+    ];
+
+    for (const p of pathsToTry) {
+      if (fs.existsSync(p)) {
+        return p;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Tải nội dung file cục bộ và trả về Buffer
+   */
+  private async getBufferFromUrl(url: string): Promise<Buffer> {
+    const localPath = this.getLocalFilePath(url);
+    if (localPath) {
+      this.abstractLogger.log(`[Local Optimizer] Đọc trực tiếp file cục bộ tại: ${localPath}`);
+      return fs.readFileSync(localPath);
+    }
+
+    this.abstractLogger.log(`[HTTP Fetcher] Tải file từ xa: ${url}`);
+    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    return Buffer.from(response.data);
   }
 }

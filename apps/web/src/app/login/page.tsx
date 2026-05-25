@@ -25,22 +25,79 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      if (isLogin) {
-        // Login
-        const res = await api.post<{
-          accessToken: string;
-          user: { id: string; name: string; email: string };
-          defaultWorkspace: { id: string; name: string; role: string } | null;
-        }>('/auth/login', { email, password });
+      const { supabase, isSupabaseConfigured } = require('@/lib/supabase');
 
-        login(res.user, res.accessToken, res.defaultWorkspace?.id || 'default');
-        window.location.href = '/dashboard';
+      if (isLogin) {
+        if (isSupabaseConfigured && supabase) {
+          console.log('🌐 Logging in via Supabase...');
+          // 1. Đăng nhập qua Supabase
+          const { data, error: supabaseError } = await supabase.auth.signInWithPassword({
+            email,
+            password,
+          });
+
+          if (supabaseError) {
+            throw new Error(supabaseError.message);
+          }
+
+          if (!data || !data.session) {
+            throw new Error('Không thể khởi tạo phiên làm việc với Supabase.');
+          }
+
+          console.log('🔄 Syncing user session with local NestJS API...');
+          // 2. Gửi token đồng bộ lên NestJS API local
+          const res = await api.post<{
+            accessToken: string;
+            user: { id: string; name: string; email: string };
+            defaultWorkspace: { id: string; name: string; role: string } | null;
+          }>('/auth/supabase-sync', {
+            email: data.user.email,
+            name: data.user.user_metadata?.name || data.user.email?.split('@')[0] || 'User',
+            supabaseToken: data.session.access_token,
+          });
+
+          // 3. Đăng nhập thành công -> Cập nhật trạng thái
+          login(res.user, res.accessToken, res.defaultWorkspace?.id || 'default');
+          window.location.href = '/dashboard';
+        } else {
+          console.log('🔌 Supabase not configured. Falling back to local auth...');
+          // Fallback: Đăng nhập Local truyền thống
+          const res = await api.post<{
+            accessToken: string;
+            user: { id: string; name: string; email: string };
+            defaultWorkspace: { id: string; name: string; role: string } | null;
+          }>('/auth/login', { email, password });
+
+          login(res.user, res.accessToken, res.defaultWorkspace?.id || 'default');
+          window.location.href = '/dashboard';
+        }
       } else {
-        // Register
-        await api.post('/auth/register', { email, password, name });
-        setSuccess('Đăng ký thành công! Hãy đăng nhập.');
-        setIsLogin(true);
-        setPassword('');
+        if (isSupabaseConfigured && supabase) {
+          // Đăng ký qua Supabase
+          const { error: signUpError } = await supabase.auth.signUp({
+            email,
+            password,
+            options: {
+              data: {
+                name,
+              },
+            },
+          });
+
+          if (signUpError) {
+            throw new Error(signUpError.message);
+          }
+
+          setSuccess('Đăng ký tài khoản Supabase thành công! Vui lòng xác thực email (nếu có) hoặc tiến hành đăng nhập.');
+          setIsLogin(true);
+          setPassword('');
+        } else {
+          // Đăng ký Local
+          await api.post('/auth/register', { email, password, name });
+          setSuccess('Đăng ký thành công! Hãy đăng nhập.');
+          setIsLogin(true);
+          setPassword('');
+        }
       }
     } catch (err: any) {
       setError(err.message || 'Có lỗi xảy ra. Vui lòng thử lại.');
@@ -48,6 +105,7 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
+
 
   return (
     <div style={styles.wrapper}>

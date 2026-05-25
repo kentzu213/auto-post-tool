@@ -83,19 +83,20 @@ model User {
 }
 
 model Workspace {
-  id             String          @id @default(uuid())
-  name           String
-  ownerId        String
-  owner          User            @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  teamMembers    TeamMember[]
-  socialAccounts SocialAccount[]
-  posts          Post[]
-  campaigns      Campaign[]
-  templates      Template[]
-  hashtagSets    HashtagSet[]
-  rssSources     RSSSource[]
+  id                  String                @id @default(uuid())
+  name                String
+  ownerId             String
+  owner               User                  @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  teamMembers         TeamMember[]
+  socialAccounts      SocialAccount[]
+  posts               Post[]
+  campaigns           Campaign[]
+  templates           Template[]
+  hashtagSets         HashtagSet[]
+  rssSources          RSSSource[]
+  providerCredentials ProviderCredential[]
 
   @@map("workspaces")
 }
@@ -397,4 +398,24 @@ model AuditLog {
   @@index([userId, action])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+// ============================================================
+// PROVIDER CREDENTIALS (OAuth API Keys)
+// ============================================================
+
+model ProviderCredential {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform     Platform
+  clientId     String    // Encrypted: Facebook App ID / Google Client ID / TikTok Client Key
+  clientSecret String    // Encrypted: App Secret / Client Secret
+  redirectUri  String    // OAuth callback URL
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([workspaceId, platform])
+  @@map("provider_credentials")
 }

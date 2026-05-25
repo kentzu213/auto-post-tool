@@ -1,4 +1,8 @@
-import { Controller, Post, Body, UseGuards } from '@nestjs/common';
+import { Controller, Post, Body, UseGuards, UseInterceptors, UploadedFile, BadRequestException } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import * as path from 'path';
+import * as fs from 'fs';
 import { MediaService } from './media.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
@@ -140,5 +144,56 @@ export class MediaController {
       platform: dto.platform,
     });
     return { queued: true, message: `Video job queued for ${dto.platform}` };
+  }
+
+  @Post('upload')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const uploadPath = path.join(process.cwd(), 'uploads');
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          cb(null, `media-${uniqueSuffix}${path.extname(file.originalname)}`);
+        },
+      }),
+      limits: {
+        fileSize: 100 * 1024 * 1024, // Giới hạn tối đa 100MB cho video lớn
+      },
+      fileFilter: (req, file, cb) => {
+        if (
+          !file.mimetype.match(/\/(jpg|jpeg|png|gif|mp4|mov|avi|webm|quicktime)$/i) &&
+          !file.originalname.match(/\.(jpg|jpeg|png|gif|mp4|mov|avi|webm)$/i)
+        ) {
+          return cb(
+            new BadRequestException('Chỉ cho phép tải lên hình ảnh (PNG, JPG, GIF) hoặc video (MP4, MOV, AVI)!'),
+            false,
+          );
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  @ApiOperation({ summary: 'Tải lên hình ảnh/video từ máy tính của bạn' })
+  @ApiResponse({ status: 201, description: 'Tải lên thành công' })
+  async uploadFile(@UploadedFile() file: any) {
+    if (!file) {
+      throw new BadRequestException('Vui lòng chọn file cần tải lên!');
+    }
+    const port = process.env.PORT || 3001;
+    const fileUrl = `http://localhost:${port}/uploads/${file.filename}`;
+    return {
+      url: fileUrl,
+      filename: file.filename,
+      mimetype: file.mimetype,
+      size: file.size,
+    };
   }
 }

@@ -11,10 +11,11 @@
   "dependencies": {
     "@auto-post/shared-types": "workspace:*",
     "@auto-post/ui": "workspace:*",
+    "@supabase/supabase-js": "^2.106.2",
+    "lucide-react": "^0.331.0",
     "next": "^14.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "lucide-react": "^0.331.0",
     "zustand": "^4.5.1"
   },
   "devDependencies": {

@@ -11,6 +11,7 @@ import {
   Link2,
   Settings,
   Zap,
+  KeyRound,
 } from 'lucide-react';
 
 const NAV_ITEMS = [
@@ -52,6 +53,10 @@ export default function Sidebar() {
 
       {/* Footer */}
       <div className="sidebar-footer">
+        <Link href="/settings/providers" className={`nav-item ${pathname?.startsWith('/settings/providers') ? 'active' : ''}`}>
+          <KeyRound size={20} />
+          <span>API Providers</span>
+        </Link>
         <Link href="/settings" className="nav-item">
           <Settings size={20} />
           <span>Cài Đặt</span>
