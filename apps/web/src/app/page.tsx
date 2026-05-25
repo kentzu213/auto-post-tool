@@ -1,8 +1,9 @@
 import { redirect } from 'next/navigation';
 
 /**
- * Root page — redirect to Composer (main working page)
+ * Root page — redirect to Login page
+ * Auth check happens client-side in the layout/pages
  */
 export default function RootPage() {
-  redirect('/composer');
+  redirect('/login');
 }
