@@ -1,0 +1,12 @@
+{
+  "name": "@auto-post/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "electron": "^28.2.0"
+  }
+}

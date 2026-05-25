@@ -1,0 +1,400 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum Role {
+  owner
+  editor
+  approver
+  viewer
+}
+
+enum Platform {
+  facebook
+  youtube
+  tiktok
+}
+
+enum PostStatus {
+  draft
+  pending_approval
+  scheduled
+  publishing
+  published
+  failed
+}
+
+enum AccountStatus {
+  active
+  expired
+  disconnected
+}
+
+enum ContentType {
+  feed
+  reels
+  story
+  shorts
+}
+
+enum ApprovalStatus {
+  pending
+  approved
+  rejected
+}
+
+enum NotificationType {
+  publish_success
+  publish_fail
+  new_comment
+  new_dm
+  approval_request
+  approval_result
+  token_expiring
+}
+
+// ============================================================
+// CORE MODELS
+// ============================================================
+
+model User {
+  id              String         @id @default(uuid())
+  email           String         @unique
+  password        String
+  name            String
+  twoFactorSecret String? // TOTP secret cho 2FA (encrypted)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  workspaces      Workspace[]    @relation("WorkspaceOwner")
+  teamMembers     TeamMember[]
+  auditLogs       AuditLog[]
+  notifications   Notification[]
+
+  @@map("users")
+}
+
+model Workspace {
+  id             String          @id @default(uuid())
+  name           String
+  ownerId        String
+  owner          User            @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  teamMembers    TeamMember[]
+  socialAccounts SocialAccount[]
+  posts          Post[]
+  campaigns      Campaign[]
+  templates      Template[]
+  hashtagSets    HashtagSet[]
+  rssSources     RSSSource[]
+
+  @@map("workspaces")
+}
+
+model TeamMember {
+  id          String    @id @default(uuid())
+  workspaceId String
+  userId      String
+  role        Role      @default(editor)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@map("team_members")
+}
+
+// ============================================================
+// SOCIAL ACCOUNTS
+// ============================================================
+
+model SocialAccount {
+  id                String           @id @default(uuid())
+  workspaceId       String
+  workspace         Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform          Platform
+  platformAccountId String // ID của Account trên FB/YT/TikTok
+  displayName       String
+  username          String
+  avatarUrl         String?
+  accessToken       String // AES-256-GCM encrypted
+  refreshToken      String? // AES-256-GCM encrypted
+  tokenExpiresAt    DateTime?
+  status            AccountStatus    @default(active)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  inboxMessages     InboxMessage[]
+  schedules         Schedule[]
+  quotaAssignment   QuotaAssignment?
+
+  @@unique([platform, platformAccountId])
+  @@map("social_accounts")
+}
+
+// ============================================================
+// CONTENT MANAGEMENT
+// ============================================================
+
+model Campaign {
+  id          String    @id @default(uuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  kpiTarget   String? // KPI đích (ví dụ JSON hoặc Text)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  posts       Post[]
+
+  @@map("campaigns")
+}
+
+model Post {
+  id               String            @id @default(uuid())
+  workspaceId      String
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaignId       String?
+  campaign         Campaign?         @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  title            String?
+  content          String            @db.Text
+  contentType      ContentType       @default(feed)
+  status           PostStatus        @default(draft)
+  scheduledAt      DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  mediaAssets      MediaAsset[]
+  schedules        Schedule[]
+  versions         PostVersion[]
+  approvalRequests ApprovalRequest[]
+
+  @@index([workspaceId, status])
+  @@index([workspaceId, scheduledAt])
+  @@map("posts")
+}
+
+model PostVersion {
+  id        String   @id @default(uuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  title     String?
+  content   String   @db.Text
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+
+  @@index([postId, version])
+  @@map("post_versions")
+}
+
+model MediaAsset {
+  id        String   @id @default(uuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  url       String
+  type      String // 'image' | 'video'
+  key       String // S3 key để xóa file khi cần
+  mimeType  String? // e.g. 'video/mp4', 'image/jpeg'
+  sizeBytes Int? // File size in bytes
+  createdAt DateTime @default(now())
+
+  @@map("media_assets")
+}
+
+model Template {
+  id          String      @id @default(uuid())
+  workspaceId String
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  content     String      @db.Text
+  platforms   Platform[] // PostgreSQL array — target platforms
+  contentType ContentType @default(feed)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([workspaceId])
+  @@map("templates")
+}
+
+model HashtagSet {
+  id          String    @id @default(uuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  hashtags    String[] // PostgreSQL array — danh sách hashtags
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([workspaceId])
+  @@map("hashtag_sets")
+}
+
+// ============================================================
+// SCHEDULING & PUBLISHING
+// ============================================================
+
+model Schedule {
+  id              String        @id @default(uuid())
+  postId          String
+  post            Post          @relation(fields: [postId], references: [id], onDelete: Cascade)
+  socialAccountId String
+  socialAccount   SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  platform        Platform
+  scheduledAt     DateTime
+  status          PostStatus    @default(scheduled)
+  errorLog        String?       @db.Text
+  publishedPostId String? // ID bài đăng sau khi thành công trên FB/YT/TikTok
+  publishedUrl    String? // URL trực tiếp bài đăng
+  retryCount      Int           @default(0)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  analytics       Analytics?
+
+  @@index([platform, status, scheduledAt])
+  @@index([postId])
+  @@map("schedules")
+}
+
+model Analytics {
+  id          String   @id @default(uuid())
+  scheduleId  String   @unique
+  schedule    Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  reach       Int      @default(0)
+  impressions Int      @default(0)
+  engagement  Int      @default(0)
+  views       Int      @default(0)
+  watchTime   Float    @default(0) // Số giờ xem
+  clicks      Int      @default(0)
+  shares      Int      @default(0)
+  comments    Int      @default(0)
+  likes       Int      @default(0)
+  saves       Int      @default(0)
+  updatedAt   DateTime @updatedAt
+
+  @@map("analytics")
+}
+
+// ============================================================
+// APPROVAL WORKFLOW
+// ============================================================
+
+model ApprovalRequest {
+  id          String         @id @default(uuid())
+  postId      String
+  post        Post           @relation(fields: [postId], references: [id], onDelete: Cascade)
+  requestedBy String // User ID của người yêu cầu duyệt
+  approvedBy  String? // User ID của người duyệt (nếu đã duyệt)
+  status      ApprovalStatus @default(pending)
+  comment     String?        @db.Text
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([postId, status])
+  @@map("approval_requests")
+}
+
+// ============================================================
+// COMMUNICATION
+// ============================================================
+
+model InboxMessage {
+  id              String        @id @default(uuid())
+  socialAccountId String
+  socialAccount   SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  platform        Platform
+  conversationId  String // ID cuộc hội thoại từ API mxh
+  senderId        String
+  senderName      String
+  senderAvatar    String?
+  messageText     String        @db.Text
+  isRead          Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+
+  @@index([socialAccountId, conversationId])
+  @@index([socialAccountId, isRead])
+  @@map("inbox_messages")
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  body      String           @db.Text
+  isRead    Boolean          @default(false)
+  metadata  String? // JSON metadata bổ sung (postId, scheduleId, etc.)
+  createdAt DateTime         @default(now())
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+// ============================================================
+// RSS AUTO-IMPORT
+// ============================================================
+
+model RSSSource {
+  id          String     @id @default(uuid())
+  workspaceId String
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  url         String
+  name        String? // Tên feed (tùy chọn)
+  autoPost    Boolean    @default(false)
+  platforms   Platform[] // PostgreSQL array — target platforms khi auto-post
+  lastFetched DateTime?
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([workspaceId, isActive])
+  @@map("rss_sources")
+}
+
+// ============================================================
+// QUOTA MANAGEMENT
+// ============================================================
+
+model QuotaAssignment {
+  id              String        @id @default(uuid())
+  socialAccountId String        @unique
+  socialAccount   SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  projectId       String // Google Cloud Project ID
+  clientId        String // OAuth Client ID cho project đó
+  dailyUsed       Int           @default(0)
+  dailyLimit      Int           @default(10000) // Giới hạn hàng ngày
+  resetAt         DateTime // Thời điểm reset quota (00:00 PST)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([projectId])
+  @@map("quota_assignments")
+}
+
+// ============================================================
+// AUDIT & LOGGING
+// ============================================================
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String // Ví dụ: 'login', 'create_post', 'delete_account'
+  details   String   @db.Text
+  ipAddress String?
+  userAgent String? // Browser/client identifier
+  createdAt DateTime @default(now())
+
+  @@index([userId, action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

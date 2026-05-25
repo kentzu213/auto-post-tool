@@ -1,0 +1,24 @@
+{
+  "name": "auto-post-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Premium Multi-Platform Auto-Posting SaaS Tool",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+    "desktop": "concurrently \"pnpm --filter @auto-post/api dev\" \"pnpm --filter @auto-post/web dev\" \"pnpm --filter @auto-post/worker dev\" \"pnpm --filter @auto-post/desktop start\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.5",
+    "turbo": "^1.13.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "packageManager": "pnpm@9.1.0"
+}
