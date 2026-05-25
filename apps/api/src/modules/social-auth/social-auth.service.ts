@@ -15,10 +15,18 @@ export class SocialAuthService {
 
   /**
    * Lấy danh sách các tài khoản MXH đã liên kết của một Workspace
+   * Fallback: nếu workspaceId không tồn tại trong DB, trả về tất cả accounts (demo mode)
    */
   async getAccounts(workspaceId: string): Promise<any[]> {
+    // Check if workspace exists
+    const workspace = await this.prisma.workspace.findUnique({
+      where: { id: workspaceId },
+    });
+
+    const whereClause = workspace ? { workspaceId } : {};
+
     return this.prisma.socialAccount.findMany({
-      where: { workspaceId },
+      where: whereClause,
       orderBy: { createdAt: 'desc' },
       select: {
         id: true,
@@ -95,11 +103,75 @@ export class SocialAuthService {
     // MOCK OAUTH EXCHANGE FLOW
     if (code.startsWith('mock_code_') || process.env.NODE_ENV === 'test') {
       this.logger.log(`[MOCK] Thực hiện trao đổi Mock Code lấy Mock Tokens cho ${platform}...`);
+
+      // Ensure a valid workspace exists — auto-create demo user + workspace if needed
+      let validWorkspaceId = workspaceId;
+      const existingWorkspace = await this.prisma.workspace.findUnique({
+        where: { id: workspaceId },
+      });
+
+      if (!existingWorkspace) {
+        this.logger.log(`[MOCK] Workspace "${workspaceId}" không tồn tại. Đang tạo Demo workspace...`);
+
+        // Find or create a demo user
+        let demoUser = await this.prisma.user.findUnique({
+          where: { email: 'demo@autopost.local' },
+        });
+
+        if (!demoUser) {
+          const bcrypt = await import('bcrypt');
+          const hashedPassword = await bcrypt.hash('demo123456', 10);
+          demoUser = await this.prisma.user.create({
+            data: {
+              email: 'demo@autopost.local',
+              password: hashedPassword,
+              name: 'Demo User',
+            },
+          });
+          this.logger.log(`[MOCK] Đã tạo Demo User: ${demoUser.email}`);
+        }
+
+        // Create workspace owned by demo user
+        const demoWorkspace = await this.prisma.workspace.create({
+          data: {
+            name: 'Demo Workspace',
+            ownerId: demoUser.id,
+          },
+        });
+
+        // Add team member
+        await this.prisma.teamMember.create({
+          data: {
+            workspaceId: demoWorkspace.id,
+            userId: demoUser.id,
+            role: 'owner',
+          },
+        });
+
+        validWorkspaceId = demoWorkspace.id;
+        this.logger.log(`[MOCK] ✅ Demo Workspace "${demoWorkspace.id}" đã sẵn sàng.`);
+      }
       
-      const mockAccountId = `mock_acc_${Math.random().toString(36).substring(7)}`;
-      const mockDisplayName = `Mock ${platform.toUpperCase()} User`;
-      const mockUsername = `@mock_${platform}`;
-      const mockAvatar = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=60';
+      const mockAccountId = `mock_acc_${platform}_${Date.now()}`;
+      const mockDisplayNames: Record<string, string> = {
+        facebook: 'AutoPost Facebook Page',
+        youtube: 'AutoPost YouTube Channel',
+        tiktok: 'AutoPost TikTok Creator',
+      };
+      const mockUsernames: Record<string, string> = {
+        facebook: '@autopost.fb',
+        youtube: '@autopost_yt',
+        tiktok: '@autopost.tiktok',
+      };
+      const mockAvatars: Record<string, string> = {
+        facebook: 'https://ui-avatars.com/api/?name=FB&background=1877F2&color=fff&size=150',
+        youtube: 'https://ui-avatars.com/api/?name=YT&background=FF0000&color=fff&size=150',
+        tiktok: 'https://ui-avatars.com/api/?name=TT&background=00F2EA&color=000&size=150',
+      };
+
+      const displayName = mockDisplayNames[platform] || `Mock ${platform} User`;
+      const username = mockUsernames[platform] || `@mock_${platform}`;
+      const avatarUrl = mockAvatars[platform] || 'https://ui-avatars.com/api/?name=AP&size=150';
       const encryptedAccessToken = this.crypto.encrypt(`mock_access_token_${Date.now()}`);
       const encryptedRefreshToken = this.crypto.encrypt(`mock_refresh_token_${Date.now()}`);
 
@@ -111,21 +183,21 @@ export class SocialAuthService {
           },
         },
         update: {
-          displayName: mockDisplayName,
-          username: mockUsername,
-          avatarUrl: mockAvatar,
+          displayName,
+          username,
+          avatarUrl,
           accessToken: encryptedAccessToken,
           refreshToken: encryptedRefreshToken,
           status: AccountStatus.active,
-          workspaceId,
+          workspaceId: validWorkspaceId,
         },
         create: {
-          workspaceId,
+          workspaceId: validWorkspaceId,
           platform,
           platformAccountId: mockAccountId,
-          displayName: mockDisplayName,
-          username: mockUsername,
-          avatarUrl: mockAvatar,
+          displayName,
+          username,
+          avatarUrl,
           accessToken: encryptedAccessToken,
           refreshToken: encryptedRefreshToken,
           status: AccountStatus.active,
