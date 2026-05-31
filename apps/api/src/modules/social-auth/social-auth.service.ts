@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../../common/services/crypto.service';
 import { Platform, AccountStatus } from '@prisma/client';
@@ -59,6 +59,25 @@ export class SocialAuthService {
     // Try to get real credentials
     const credentials = await this.credentialsService.getCredentials(workspaceId, platform);
 
+    // CHỈ áp dụng kiểm tra nghiêm ngặt cho YouTube
+    if (platform === Platform.youtube) {
+      if (!credentials) {
+        throw new BadRequestException(
+          `Bạn chưa cấu hình Google API Credentials cho YouTube trong Cài đặt. ` +
+          `Vui lòng vào menu 'Cấu hình API Providers' trong phần Cài đặt (Settings), ` +
+          `điền đầy đủ Google Client ID và Google Client Secret thật của bạn trước khi kết nối OAuth!`
+        );
+      }
+
+      if (credentials.clientSecret === 'direct_token_mode') {
+        throw new BadRequestException(
+          `Bạn chưa cấu hình Google Client Secret thật cho YouTube trong Cài đặt. ` +
+          `Vui lòng vào mục "Cấu hình API Providers" ở menu Cài đặt (Settings), ` +
+          `điền Google Client ID & Google Client Secret thật rồi bấm Lưu để có thể kết nối OAuth kênh thật!`
+        );
+      }
+    }
+
     if (credentials) {
       // ✅ REAL OAUTH — redirect tới platform thật
       const provider = this.providerManager.getProvider(platform);
@@ -80,7 +99,7 @@ export class SocialAuthService {
       return url;
     }
 
-    // ⚠️ MOCK FALLBACK — chưa cấu hình credentials
+    // ⚠️ MOCK FALLBACK cho các nền tảng khác nếu chưa cấu hình
     this.logger.warn(`⚠️ [${platform}] Chưa cấu hình API credentials. Sử dụng Mock OAuth.`);
     return `http://localhost:3005/auth/mock-oauth?platform=${platform}&state=${workspaceId}`;
   }
@@ -449,7 +468,7 @@ export class SocialAuthService {
             avatarUrl = channel.snippet.thumbnails?.high?.url || channel.snippet.thumbnails?.default?.url || avatarUrl;
             this.logger.log(`[Direct Connect] Lấy thông tin YouTube thành công: "${displayName}"`);
           } else {
-            throw new Error('Tài khoản Google này không có kênh YouTube nào được tạo hoặc chưa kích hoạt!');
+            throw new BadRequestException('Tài khoản Google này không có kênh YouTube nào được tạo hoặc chưa kích hoạt!');
           }
         } else if (platform === 'tiktok') {
           this.logger.log(`[Direct Connect] Đang tải thông tin TikTok từ API thật...`);
@@ -464,7 +483,7 @@ export class SocialAuthService {
             avatarUrl = user.avatar_url || avatarUrl;
             this.logger.log(`[Direct Connect] Lấy thông tin TikTok thành công: "${displayName}"`);
           } else {
-            throw new Error('Không tìm thấy thông tin người dùng TikTok!');
+            throw new BadRequestException('Không tìm thấy thông tin người dùng TikTok!');
           }
         }
       } catch (err: any) {
@@ -472,7 +491,7 @@ export class SocialAuthService {
         this.logger.error(`❌ [Direct Connect] Lỗi khi lấy profile thật cho ${platform}: ${err.message} ${errorData}`);
         this.logger.error(`Stack trace: ${err.stack}`);
         const apiErrorMsg = err.response?.data?.error?.message || err.message;
-        throw new Error(`Lỗi kết nối ${platform}: ${apiErrorMsg}`);
+        throw new BadRequestException(`Lỗi kết nối ${platform}: ${apiErrorMsg}`);
       }
     }
 

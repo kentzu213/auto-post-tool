@@ -185,9 +185,13 @@ export class TikTokPublisher extends SocialAbstract {
   }
 
   /**
-   * Lấy số liệu thống kê Video
+   * Lấy số liệu thống kê Video.
+   * LƯU Ý: nhánh thật của TikTok hiện chưa được xác minh (yêu cầu App đã pass Audit +
+   * scope research/insights). Giữ nguyên hành vi cũ; chỉ bổ sung tham số accessToken để
+   * sync job truyền token đồng nhất. Tài khoản mock bị bỏ qua ở tầng sync nên nhánh thật
+   * không chạy trong môi trường dev.
    */
-  async getInsights(publishedPostId: string): Promise<Record<string, any>> {
+  async getInsights(publishedPostId: string, _accessToken?: string): Promise<Record<string, any>> {
     if (publishedPostId.startsWith('tt_post_mock_')) {
       return {
         views: Math.floor(Math.random() * 50000) + 1000,

@@ -1,13 +1,17 @@
-import { Controller, Get, Patch, Query, Param } from '@nestjs/common';
+import { Controller, Get, Patch, Post, Query, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiBearerAuth } from '@nestjs/swagger';
 import { InboxService } from './inbox.service';
+import { InboxIngestionService } from './inbox-ingestion.service';
 import { Platform } from '@prisma/client';
 
 @ApiTags('inbox')
 @ApiBearerAuth()
 @Controller('inbox')
 export class InboxController {
-  constructor(private readonly inboxService: InboxService) {}
+  constructor(
+    private readonly inboxService: InboxService,
+    private readonly ingestionService: InboxIngestionService,
+  ) {}
 
   @Get('messages')
   @ApiOperation({
@@ -61,5 +65,18 @@ export class InboxController {
   @ApiResponse({ status: 200, description: 'Tất cả đã đánh dấu đọc.' })
   async markAllAsRead(@Query('workspaceId') workspaceId: string) {
     return this.inboxService.markAllAsRead(workspaceId);
+  }
+
+  @Post('sync')
+  @ApiOperation({
+    summary: 'Đồng bộ tin nhắn/bình luận THẬT từ MXH theo yêu cầu',
+    description:
+      'Poll Facebook Messenger + YouTube comment threads cho các tài khoản active của workspace và upsert vào inbox. ' +
+      'Token mock bị bỏ qua (không tạo dữ liệu giả). TikTok đang gated do giới hạn API.',
+  })
+  @ApiQuery({ name: 'workspaceId', required: true })
+  @ApiResponse({ status: 200, description: 'Tổng kết quá trình đồng bộ.' })
+  async sync(@Query('workspaceId') workspaceId: string) {
+    return this.ingestionService.syncWorkspace(workspaceId);
   }
 }

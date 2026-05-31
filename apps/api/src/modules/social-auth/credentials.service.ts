@@ -98,21 +98,7 @@ export class CredentialsService {
       };
     }
 
-    // No credentials found — also check for credentials with no specific workspace (global fallback)
-    const anyCredential = await this.prisma.providerCredential.findFirst({
-      where: { platform, isActive: true },
-    });
-
-    if (anyCredential) {
-      this.logger.log(`[${platform}] Using global fallback credentials from database`);
-      return {
-        clientId: this.crypto.decrypt(anyCredential.clientId),
-        clientSecret: this.crypto.decrypt(anyCredential.clientSecret),
-        redirectUri: anyCredential.redirectUri,
-      };
-    }
-
-    this.logger.warn(`[${platform}] ⚠️ Không tìm thấy credentials. Cần cấu hình qua Settings hoặc .env`);
+    this.logger.warn(`[${platform}] ⚠️ Không tìm thấy credentials cho workspace ${workspaceId}. Cần cấu hình qua Settings hoặc .env`);
     return null;
   }
 

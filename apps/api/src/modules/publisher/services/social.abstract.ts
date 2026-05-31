@@ -27,7 +27,7 @@ export abstract class SocialAbstract implements IPublisher {
     options?: Record<string, any>
   ): Promise<PublishResult>;
   abstract delete(publishedPostId: string): Promise<boolean>;
-  abstract getInsights(publishedPostId: string): Promise<Record<string, any>>;
+  abstract getInsights(publishedPostId: string, accessToken?: string): Promise<Record<string, any>>;
 
   /**
    * Lấy hoặc khởi tạo Circuit Breaker cho từng platform

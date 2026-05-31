@@ -4,6 +4,11 @@ import { Queue } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Interval, Cron } from '@nestjs/schedule';
 import { SocialAuthService } from '../social-auth/social-auth.service';
+import { CryptoService } from '../../common/services/crypto.service';
+import { FacebookPublisher } from '../publisher/services/facebook.publisher';
+import { YouTubePublisher } from '../publisher/services/youtube.publisher';
+import { TikTokPublisher } from '../publisher/services/tiktok.publisher';
+import { Platform } from '@prisma/client';
 
 @Injectable()
 export class SchedulerService implements OnModuleInit {
@@ -13,6 +18,10 @@ export class SchedulerService implements OnModuleInit {
     @InjectQueue('publishing-queue') private readonly publishingQueue: Queue,
     private readonly prisma: PrismaService,
     private readonly socialAuthService: SocialAuthService,
+    private readonly crypto: CryptoService,
+    private readonly facebookPublisher: FacebookPublisher,
+    private readonly youtubePublisher: YouTubePublisher,
+    private readonly tiktokPublisher: TikTokPublisher,
   ) {}
 
   onModuleInit() {
@@ -122,5 +131,148 @@ export class SchedulerService implements OnModuleInit {
     } catch (error: any) {
       this.logger.error(`💥 [Early Token Refresh Cron] Lỗi khi chạy cron early refresh: ${error.message}`);
     }
+  }
+
+  /**
+   * Đồng bộ số liệu THỰC TẾ từ nền tảng MXH về bảng Analytics — chạy mỗi 15 phút.
+   *
+   * Vì sao đặt ở API process (SchedulerService) thay vì worker:
+   *   Worker (apps/worker) là tiến trình tách biệt, KHÔNG nằm trong Nest DI container nên
+   *   không truy cập được các Publisher service. Đặt job tại đây cho phép tái sử dụng trực
+   *   tiếp publisher.getInsights() đã có sẵn (vốn là dead code trước đây) qua Nest DI.
+   *
+   * Nguyên tắc TRUNG THỰC & degrade gracefully:
+   *   - Chỉ xử lý các SocialAccount status='active'.
+   *   - Chỉ xử lý Schedule status='published', có publishedPostId, và đăng trong N ngày gần đây
+   *     (giới hạn chi phí gọi API).
+   *   - Tài khoản/token MOCK (token giải mã bắt đầu bằng 'mock_') hoặc publishedPostId chứa
+   *     '_mock_' → BỎ QUA, không bịa số liệu (getInsights của publisher trả random cho id mock,
+   *     nên ta KHÔNG gọi nó cho các bài mock). Dashboard sẽ hiển thị nhãn "demo" một cách trung thực.
+   *   - Lỗi rate-limit / token / API → getInsights trả về {} → GIỮ NGUYÊN bản ghi Analytics cũ,
+   *     log cảnh báo và tiếp tục. KHÔNG xóa, KHÔNG random-fill.
+   *   - Dùng upsert theo @unique scheduleId để re-sync cập nhật tại chỗ và đóng dấu updatedAt.
+   */
+  @Interval(15 * 60 * 1000) // 15 phút
+  async syncRealAnalytics() {
+    this.logger.log('📈 [Analytics Sync] Bắt đầu đồng bộ số liệu thực tế từ các nền tảng MXH...');
+
+    const RECENT_DAYS = 7;
+    const since = new Date(Date.now() - RECENT_DAYS * 24 * 60 * 60 * 1000);
+
+    let synced = 0;
+    let skipped = 0;
+    let degraded = 0;
+
+    try {
+      const accounts = await this.prisma.socialAccount.findMany({
+        where: { status: 'active' },
+      });
+
+      for (const account of accounts) {
+        // Giải mã token (tái sử dụng cùng cơ chế crypto của hệ thống). Lỗi giải mã → bỏ qua account.
+        let accessToken: string;
+        try {
+          accessToken = this.crypto.decrypt(account.accessToken);
+        } catch (e: any) {
+          this.logger.warn(`⚠️ [Analytics Sync] Không giải mã được token của ${account.displayName}: ${e.message}. Bỏ qua.`);
+          continue;
+        }
+
+        const isMockToken = accessToken.startsWith('mock_');
+
+        const schedules = await this.prisma.schedule.findMany({
+          where: {
+            socialAccountId: account.id,
+            status: 'published',
+            publishedPostId: { not: null },
+            scheduledAt: { gte: since },
+          },
+        });
+
+        for (const schedule of schedules) {
+          const publishedPostId = schedule.publishedPostId as string;
+
+          // MOCK/DEMO: không bịa số liệu. Bỏ qua để dashboard hiển thị nhãn demo trung thực.
+          if (isMockToken || publishedPostId.includes('_mock_')) {
+            skipped++;
+            continue;
+          }
+
+          try {
+            const insights = await this.fetchInsights(account.platform, publishedPostId, accessToken);
+
+            // getInsights trả {} khi lỗi rate-limit/token/API → giữ nguyên bản ghi cũ.
+            if (!insights || Object.keys(insights).length === 0) {
+              degraded++;
+              this.logger.warn(
+                `⚠️ [Analytics Sync] Không lấy được insights cho schedule ${schedule.id} (${account.platform}). Giữ nguyên số liệu cũ.`,
+              );
+              continue;
+            }
+
+            const data = this.normalizeInsights(insights);
+            await this.prisma.analytics.upsert({
+              where: { scheduleId: schedule.id },
+              create: { scheduleId: schedule.id, ...data },
+              update: data,
+            });
+            synced++;
+          } catch (err: any) {
+            // Bất kỳ lỗi ngoài dự kiến nào: GIỮ NGUYÊN dữ liệu cũ, log và tiếp tục.
+            degraded++;
+            this.logger.warn(
+              `⚠️ [Analytics Sync] Lỗi đồng bộ schedule ${schedule.id} (${account.platform}): ${err.message}. Giữ nguyên số liệu cũ.`,
+            );
+          }
+        }
+      }
+
+      this.logger.log(
+        `✔ [Analytics Sync] Hoàn tất. Đã đồng bộ ${synced} bài, bỏ qua ${skipped} bài mock/demo, giữ nguyên ${degraded} bài do lỗi/không có dữ liệu.`,
+      );
+    } catch (error: any) {
+      this.logger.error(`💥 [Analytics Sync] Lỗi tổng thể khi đồng bộ analytics: ${error.message}`);
+    }
+  }
+
+  /**
+   * Gọi getInsights() của publisher tương ứng theo nền tảng, truyền access token đã giải mã.
+   * Publisher tự xử lý resilience (circuit breaker + retry) và trả {} khi lỗi/không có dữ liệu.
+   */
+  private async fetchInsights(
+    platform: Platform,
+    publishedPostId: string,
+    accessToken: string,
+  ): Promise<Record<string, any>> {
+    switch (platform) {
+      case 'facebook':
+        return this.facebookPublisher.getInsights(publishedPostId, accessToken);
+      case 'youtube':
+        return this.youtubePublisher.getInsights(publishedPostId, accessToken);
+      case 'tiktok':
+        return this.tiktokPublisher.getInsights(publishedPostId, accessToken);
+      default:
+        return {};
+    }
+  }
+
+  /**
+   * Chuẩn hóa kết quả insights (mỗi nền tảng trả tập field khác nhau) về schema Analytics.
+   * Field nào nền tảng không trả → mặc định 0 (chỉ phản ánh đúng dữ liệu API cung cấp).
+   */
+  private normalizeInsights(insights: Record<string, any>) {
+    const num = (v: any) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    return {
+      reach: Math.round(num(insights.reach)),
+      impressions: Math.round(num(insights.impressions)),
+      engagement: Math.round(num(insights.engagement)),
+      views: Math.round(num(insights.views)),
+      watchTime: num(insights.watchTime),
+      clicks: Math.round(num(insights.clicks)),
+      shares: Math.round(num(insights.shares)),
+      comments: Math.round(num(insights.comments)),
+      likes: Math.round(num(insights.likes)),
+      saves: Math.round(num(insights.saves)),
+    };
   }
 }

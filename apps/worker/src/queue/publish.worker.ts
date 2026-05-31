@@ -289,6 +289,31 @@ export function startPublishWorker() {
             },
           });
 
+          // HONEST DATA: KHÔNG bịa số liệu. Trước đây khối này dùng Math.random() để
+          // fabricate reach/views/engagement — tạo dữ liệu giả mạo trên dashboard. Đã loại bỏ.
+          //
+          // Thay vào đó: upsert một bản ghi Analytics khởi tạo TOÀN BỘ giá trị = 0 (theo
+          // default của schema) để "có một dòng tồn tại" cho schedule vừa đăng, nhưng KHÔNG
+          // chứa bất kỳ con số giả nào. Số liệu THẬT sẽ được job đồng bộ định kỳ trong API
+          // process (SchedulerService.syncRealAnalytics) ghi đè vào đây qua getInsights().
+          //
+          // - create chỉ truyền scheduleId → mọi metric = 0 (pending/chưa đồng bộ).
+          // - update: {} → nếu bản ghi đã tồn tại (đăng lại / re-sync) thì GIỮ NGUYÊN số
+          //   liệu thật đã có, không ghi đè về 0.
+          // Dashboard nhận diện trạng thái 'pending' qua việc tất cả metric = 0 (không dùng
+          // sự tồn tại của dòng làm tín hiệu đã-đồng-bộ).
+          try {
+            await prisma.analytics.upsert({
+              where: { scheduleId },
+              create: { scheduleId },
+              update: {},
+            });
+          } catch (analyticsErr: any) {
+            logger.warn(
+              `⚠️ Không thể khởi tạo bản ghi Analytics zero cho schedule ${scheduleId} (không ảnh hưởng đăng bài): ${analyticsErr.message}`,
+            );
+          }
+
           await checkAndUpdateOverallPostStatus(post.id);
 
           logger.log(`🎉 Đăng bài thành công lên [${platform.toUpperCase()}]! Post ID: ${publishResult.publishedPostId}`);

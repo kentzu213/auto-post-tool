@@ -14,6 +14,12 @@ export class AnalyticsService {
   async getDashboardSummary(workspaceId: string) {
     this.logger.log(`📊 Lấy dashboard summary cho workspace ${workspaceId}...`);
 
+    // ĐỌC THUẦN (read-only): endpoint này KHÔNG được ghi hay bịa số liệu.
+    // Trước đây tại đây có khối Math.random() tạo Analytics giả cho mọi schedule đã
+    // 'published' nhưng thiếu Analytics, và GHI luôn vào DB ngay trong đường đọc — sai cả
+    // về tính trung thực lẫn nguyên tắc read-only. Đã loại bỏ. Số liệu thật được thu thập
+    // bởi job đồng bộ định kỳ (SchedulerService.syncRealAnalytics) gọi publisher.getInsights().
+
     // 1. Lấy tất cả analytics qua schedules → posts → workspace
     const analytics = await this.prisma.analytics.findMany({
       where: {
@@ -60,11 +66,82 @@ export class AnalyticsService {
       _count: { id: true },
     });
 
+    // 5. Freshness + tính trung thực của dữ liệu (CHỈ ĐỌC, không ghi, không random)
+    //    - lastSyncedAt: thời điểm Analytics được cập nhật gần nhất trong workspace (max updatedAt) hoặc null.
+    //    - dataSource (tổng thể):
+    //        'demo'    = toàn bộ bài đã đăng đều là mock/demo (publishedPostId chứa '_mock_').
+    //        'live'    = có bài đăng THẬT (không mock) đã nhận về số liệu THẬT (≥ 1 metric > 0).
+    //        'pending' = đã đăng bài thật nhưng CHƯA có số liệu thật, hoặc chưa đăng bài nào.
+    //
+    //    Lưu ý trung thực: worker nay luôn tạo bản ghi Analytics gồm toàn số 0 khi đăng thành công,
+    //    nên sự TỒN TẠI của bản ghi KHÔNG còn là tín hiệu "đã đồng bộ". Vì vậy 'live' chỉ bật khi
+    //    có ít nhất 1 metric > 0 từ bài đăng thật (số liệu do getInsights() thật ghi đè). Hệ quả
+    //    bảo thủ: một bài thật mà số liệu thật = 0 vẫn xếp 'pending' cho tới khi có con số > 0.
+    const publishedSchedules = await this.prisma.schedule.findMany({
+      where: {
+        post: { workspaceId },
+        status: 'published',
+        publishedPostId: { not: null },
+      },
+      select: {
+        publishedPostId: true,
+        analytics: {
+          select: {
+            reach: true,
+            impressions: true,
+            engagement: true,
+            views: true,
+            watchTime: true,
+            clicks: true,
+            shares: true,
+            comments: true,
+            likes: true,
+            saves: true,
+          },
+        },
+      },
+    });
+
+    const publishedCount = publishedSchedules.length;
+    const mockCount = publishedSchedules.filter((s) => s.publishedPostId?.includes('_mock_')).length;
+    const hasRealMetrics = (a: NonNullable<(typeof publishedSchedules)[number]['analytics']>) =>
+      a.reach > 0 ||
+      a.impressions > 0 ||
+      a.engagement > 0 ||
+      a.views > 0 ||
+      a.watchTime > 0 ||
+      a.clicks > 0 ||
+      a.shares > 0 ||
+      a.comments > 0 ||
+      a.likes > 0 ||
+      a.saves > 0;
+    const liveCount = publishedSchedules.filter(
+      (s) => !s.publishedPostId?.includes('_mock_') && s.analytics && hasRealMetrics(s.analytics),
+    ).length;
+
+    let dataSource: 'live' | 'demo' | 'pending';
+    if (publishedCount === 0) {
+      dataSource = 'pending';
+    } else if (mockCount === publishedCount) {
+      dataSource = 'demo';
+    } else if (liveCount > 0) {
+      dataSource = 'live';
+    } else {
+      dataSource = 'pending';
+    }
+
+    const lastSyncedAt = analytics.reduce<Date | null>(
+      (latest, a) => (!latest || a.updatedAt > latest ? a.updatedAt : latest),
+      null,
+    );
+
     return {
       overview: totals,
       postsByStatus: postStats.map(s => ({ status: s.status, count: s._count.id })),
       postsByPlatform: platformStats.map(s => ({ platform: s.platform, count: s._count.id })),
       analyticsCount: analytics.length,
+      lastSyncedAt,
+      dataSource,
     };
   }
 

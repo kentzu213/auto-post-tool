@@ -348,7 +348,7 @@ export class FacebookPublisher extends SocialAbstract {
   /**
    * Lấy số liệu thống kê bài đăng
    */
-  async getInsights(publishedPostId: string): Promise<Record<string, any>> {
+  async getInsights(publishedPostId: string, accessToken?: string): Promise<Record<string, any>> {
     if (publishedPostId.startsWith('fb_post_mock_')) {
       return {
         reach: Math.floor(Math.random() * 5000) + 100,
@@ -358,11 +358,17 @@ export class FacebookPublisher extends SocialAbstract {
       };
     }
 
+    if (!accessToken) {
+      this.abstractLogger.warn(`Bỏ qua getInsights Facebook cho ${publishedPostId}: thiếu access token.`);
+      return {};
+    }
+
     try {
       return await this.executeResiliently('facebook', async () => {
         const response = await axios.get(`${this.baseUrl}/${publishedPostId}/insights`, {
           params: {
             metric: 'post_impressions_unique,post_impressions,post_engaged_users,post_clicks',
+            access_token: accessToken,
           },
         });
 

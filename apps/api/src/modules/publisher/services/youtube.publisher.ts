@@ -232,9 +232,10 @@ export class YouTubePublisher extends SocialAbstract {
   }
 
   /**
-   * Lấy số liệu thống kê Video
+   * Lấy số liệu thống kê Video qua YouTube Data API v3 `videos.list` (part=statistics).
+   * Quota-friendly: mỗi lần đọc chỉ tốn 1 đơn vị quota.
    */
-  async getInsights(publishedPostId: string): Promise<Record<string, any>> {
+  async getInsights(publishedPostId: string, accessToken?: string): Promise<Record<string, any>> {
     if (publishedPostId.startsWith('yt_video_mock_')) {
       return {
         views: Math.floor(Math.random() * 20000) + 500,
@@ -244,13 +245,35 @@ export class YouTubePublisher extends SocialAbstract {
       };
     }
 
+    if (!accessToken) {
+      this.abstractLogger.warn(`Bỏ qua getInsights YouTube cho ${publishedPostId}: thiếu access token.`);
+      return {};
+    }
+
     try {
       return await this.executeResiliently('youtube', async () => {
+        const response = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+          params: { part: 'statistics', id: publishedPostId },
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        const stats = response.data?.items?.[0]?.statistics;
+        if (!stats) {
+          // Video không tồn tại / không có quyền xem statistics → không có dữ liệu thật.
+          return {};
+        }
+
+        const views = Number(stats.viewCount) || 0;
+        const likes = Number(stats.likeCount) || 0;
+        const comments = Number(stats.commentCount) || 0;
+
+        // YouTube không cung cấp reach/watchTime qua Data API public (cần YouTube Analytics API
+        // với scope riêng). Chỉ ánh xạ các field API thực sự trả về; engagement = likes + comments.
         return {
-          views: 120,
-          reach: 180,
-          engagement: 34,
-          watchTime: 12.5,
+          views,
+          likes,
+          comments,
+          engagement: likes + comments,
         };
       });
     } catch (error: any) {

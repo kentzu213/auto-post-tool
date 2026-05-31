@@ -32,6 +32,9 @@ export interface IPublisher {
 
   /**
    * Lấy số liệu thống kê (insights/engagement) của bài viết đã đăng
+   * @param publishedPostId ID bài đăng trên nền tảng
+   * @param accessToken Token đã giải mã của tài khoản (bắt buộc cho các lời gọi API thật;
+   *                    bỏ qua đối với bài mock). Trả về {} khi lỗi/không có dữ liệu.
    */
-  getInsights(publishedPostId: string): Promise<Record<string, any>>;
+  getInsights(publishedPostId: string, accessToken?: string): Promise<Record<string, any>>;
 }
