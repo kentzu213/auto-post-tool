@@ -7,7 +7,10 @@ export class CryptoService {
   private readonly key: Buffer;
 
   constructor() {
-    const hexKey = process.env.ENCRYPTION_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const hexKey = process.env.ENCRYPTION_KEY;
+    if (!hexKey) {
+      throw new Error('CRITICAL: ENCRYPTION_KEY environment variable is required.');
+    }
     this.key = Buffer.from(hexKey, 'hex');
     
     if (this.key.length !== 32) {

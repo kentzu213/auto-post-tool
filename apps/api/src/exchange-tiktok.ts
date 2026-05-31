@@ -4,7 +4,10 @@ import * as crypto from 'crypto';
 import axios from 'axios';
 import * as readline from 'readline';
 
-const hexKey = process.env.ENCRYPTION_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const hexKey = process.env.ENCRYPTION_KEY;
+if (!hexKey) {
+  throw new Error('CRITICAL: ENCRYPTION_KEY environment variable is required.');
+}
 const key = Buffer.from(hexKey, 'hex');
 
 function decrypt(encryptedText: string): string {
