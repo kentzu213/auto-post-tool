@@ -2,6 +2,17 @@
 
 All notable changes to Auto-Post Tool will be documented in this file.
 
+## [1.1.1] - 2026-05-31
+
+### Sửa lỗi Launcher (Desktop) — API & Web báo "LỖI" sau khi cài .exe
+- **Nguyên nhân gốc**: Trình khởi chạy Electron là *thin launcher*. Khi chạy bản đã đóng gói (`app.isPackaged = true`), `__dirname` nằm trong `resources/app.asar`, nên `resolveWorkspaceRoot()` (chỉ dựa vào `__dirname/../..` và `IZZI_APP_ROOT`) không tìm được `apps/api/dist/src/main.js` → API và Web bị gán trạng thái `'error'` ("LỖI"), trong khi DB hiển thị xanh do kiểm tra trực tiếp cổng Docker thật.
+- **Khắc phục (Option A — thin launcher tin cậy hơn)**:
+  - Nhúng đường dẫn tuyệt đối của monorepo vào bản build qua `app-config.json` (sinh bởi `generate-config.js` ngay trước khi `electron-builder` đóng gói). Bản `.exe` đã cài đọc file này để tìm lại mã nguồn đã build.
+  - `resolveWorkspaceRoot()` nay thử lần lượt: `IZZI_APP_ROOT` → `appRoot` nhúng từ build → `__dirname/../..`.
+  - Thêm `checkProductionBuild()` kiểm tra đúng artifact production cho từng dịch vụ: API (`apps/api/dist/src/main.js`), Web (`apps/web/.next/BUILD_ID` — yêu cầu `next build`, không phải `next dev`), Worker (`apps/worker/dist/index.js`).
+  - Thông điệp lỗi trên Launcher nay nêu rõ thiếu gì và cách xử lý (đặt `IZZI_APP_ROOT` hoặc chạy `next build`), thay cho nhãn "LỖI" trống.
+- **Lưu ý mô hình thin-launcher**: Bản `.exe` vẫn cần monorepo có sẵn trên ổ đĩa + hạ tầng Docker (PostgreSQL/Redis/MinIO) đang chạy + các file `.env`. Nếu repo nằm ở đường dẫn khác mặc định, đặt biến môi trường `IZZI_APP_ROOT` trỏ tới thư mục dự án.
+
 ## [1.1.0] - 2026-05-31
 
 ### Analytics trung thực & gần real-time

@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { spawn, exec } = require('child_process');
 const net = require('net');
 
@@ -26,6 +27,9 @@ const serviceStates = {
   web: 'checking'
 };
 
+// Thông điệp lỗi chi tiết theo từng dịch vụ (hiển thị trên Launcher khi state = 'error')
+const serviceErrors = {};
+
 // Hàm kiểm tra trạng thái cổng (Pure Node.js)
 function checkPort(port) {
   return new Promise((resolve) => {
@@ -49,7 +53,16 @@ function checkPort(port) {
 function broadcastStatus() {
   if (launcherWindow && !launcherWindow.isDestroyed()) {
     launcherWindow.webContents.send('service-status-update', serviceStates);
+    launcherWindow.webContents.send('service-error-update', serviceErrors);
   }
+}
+
+// Đặt trạng thái lỗi kèm thông điệp rõ ràng cho một dịch vụ
+function setServiceError(serviceName, message) {
+  serviceStates[serviceName] = 'error';
+  serviceErrors[serviceName] = message;
+  console.error(`[${serviceName} Error]: ${message}`);
+  broadcastStatus();
 }
 
 // Quét kiểm tra tất cả các dịch vụ
@@ -108,39 +121,119 @@ async function performServicesCheck() {
   }
 }
 
+// Đọc đường dẫn gốc monorepo được nhúng tại thời điểm build (app-config.json).
+// File này do generate-config.js sinh ra trước khi electron-builder đóng gói,
+// nên bản .exe đã cài vẫn biết repo nằm ở đâu trên máy dev.
+function readEmbeddedAppRoot() {
+  try {
+    const cfgPath = path.join(__dirname, 'app-config.json');
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      if (cfg && cfg.appRoot) return cfg.appRoot;
+    }
+  } catch (e) {
+    console.error('[config] Không đọc được app-config.json:', e.message);
+  }
+  return null;
+}
+
+// Tìm thư mục gốc monorepo (chứa apps/api/dist) một cách đáng tin cậy.
+// Thứ tự ưu tiên các ứng viên:
+//   1) biến môi trường IZZI_APP_ROOT (người dùng tự cấu hình nếu repo ở vị trí khác)
+//   2) appRoot nhúng tại build-time (app-config.json) -> giúp .exe đã cài tìm lại repo
+//   3) __dirname/../.. (trường hợp chạy dev / unpackaged)
+// Trả về null nếu không tìm thấy -> để báo lỗi rõ ràng thay vì spawn nhầm.
+function resolveWorkspaceRoot() {
+  const candidates = [];
+  if (process.env.IZZI_APP_ROOT) {
+    candidates.push(process.env.IZZI_APP_ROOT);
+  }
+  const embedded = readEmbeddedAppRoot();
+  if (embedded) {
+    candidates.push(embedded);
+  }
+  candidates.push(path.join(__dirname, '../..'));
+
+  for (const root of candidates) {
+    if (root && fs.existsSync(path.join(root, 'apps/api/dist/src/main.js'))) {
+      return root;
+    }
+  }
+  return null;
+}
+
+// Kiểm tra các artifact build cần thiết cho chế độ production của từng dịch vụ.
+// Trả về null nếu hợp lệ, hoặc một thông điệp lỗi rõ ràng (tiếng Việt) nếu thiếu.
+function checkProductionBuild(serviceName, workspaceRoot) {
+  if (serviceName === 'api') {
+    if (!fs.existsSync(path.join(workspaceRoot, 'apps/api/dist/src/main.js'))) {
+      return 'Thiếu bản build API (apps/api/dist/src/main.js). Hãy chạy: pnpm --filter @auto-post/api build';
+    }
+  } else if (serviceName === 'web') {
+    // next start YÊU CẦU bản build production (.next/BUILD_ID), không phải next dev
+    if (!fs.existsSync(path.join(workspaceRoot, 'apps/web/.next/BUILD_ID'))) {
+      return 'Thiếu bản build production của Web (apps/web/.next/BUILD_ID). Hãy chạy: pnpm --filter @auto-post/web build';
+    }
+  } else if (serviceName === 'worker') {
+    if (!fs.existsSync(path.join(workspaceRoot, 'apps/worker/dist/index.js'))) {
+      return 'Thiếu bản build Worker (apps/worker/dist/index.js). Hãy chạy: pnpm --filter @auto-post/worker build';
+    }
+  }
+  return null;
+}
+
 // Khởi chạy các tiến trình Node.js ngầm
 function startNodeService(serviceName) {
   serviceStates[serviceName] = 'starting';
   broadcastStatus();
 
   const isPackaged = app.isPackaged;
-  const workspaceRoot = path.join(__dirname, '../..');
-  
+  const workspaceRoot = resolveWorkspaceRoot();
+
   let child;
-  
+
   if (!isPackaged) {
     // Chế độ phát triển (Development): Chạy lệnh qua pnpm workspace
+    const devRoot = workspaceRoot || path.join(__dirname, '../..');
     const filter = serviceName === 'api' ? '@auto-post/api' : (serviceName === 'web' ? '@auto-post/web' : '@auto-post/worker');
     console.log(`🚀 Starting ${serviceName} in dev mode via pnpm...`);
-    
+
     child = spawn('pnpm', ['--filter', filter, 'dev'], {
       shell: true,
-      cwd: workspaceRoot
+      cwd: devRoot
     });
   } else {
     // Chế độ sản phẩm (Production): Chạy trực tiếp các file build dist/.next
     console.log(`🚀 Starting ${serviceName} in production mode...`);
+    if (!workspaceRoot) {
+      // Không tìm thấy mã nguồn đã build -> báo lỗi rõ ràng thay vì spawn nhầm đường dẫn
+      setServiceError(
+        serviceName,
+        'Không tìm thấy thư mục dự án (apps/api/dist). Hãy đặt biến môi trường IZZI_APP_ROOT trỏ tới thư mục monorepo trên máy, rồi mở lại ứng dụng.'
+      );
+      return;
+    }
+    // Kiểm tra artifact build production của riêng dịch vụ này
+    const buildError = checkProductionBuild(serviceName, workspaceRoot);
+    if (buildError) {
+      setServiceError(serviceName, buildError);
+      return;
+    }
     if (serviceName === 'api') {
-      child = spawn('node', [path.join(workspaceRoot, 'apps/api/dist/main.js')], {
-        shell: true
+      child = spawn('node', [path.join(workspaceRoot, 'apps/api/dist/src/main.js')], {
+        shell: true,
+        cwd: path.join(workspaceRoot, 'apps/api')
       });
     } else if (serviceName === 'web') {
-      child = spawn('node', [path.join(workspaceRoot, 'node_modules/next/dist/bin/next'), 'start', '-p', '3005'], {
-        shell: true
+      // next start cần chạy với cwd = apps/web để tìm thư mục .next; next bin nằm trong node_modules của web
+      child = spawn('node', [path.join(workspaceRoot, 'apps/web/node_modules/next/dist/bin/next'), 'start', '-p', '3005'], {
+        shell: true,
+        cwd: path.join(workspaceRoot, 'apps/web')
       });
     } else if (serviceName === 'worker') {
-      child = spawn('node', [path.join(workspaceRoot, 'apps/worker/dist/main.js')], {
-        shell: true
+      child = spawn('node', [path.join(workspaceRoot, 'apps/worker/dist/index.js')], {
+        shell: true,
+        cwd: path.join(workspaceRoot, 'apps/worker')
       });
     }
   }
@@ -156,8 +249,10 @@ function startNodeService(serviceName) {
   child.on('close', (code) => {
     console.log(`[${serviceName}] exited with code ${code}`);
     if (serviceStates[serviceName] !== 'active') {
-      serviceStates[serviceName] = 'error';
-      broadcastStatus();
+      setServiceError(
+        serviceName,
+        `Tiến trình ${serviceName} thoát với mã ${code}. Kiểm tra log/cổng (API:3001, Web:3005) hoặc file .env tương ứng.`
+      );
     }
   });
 

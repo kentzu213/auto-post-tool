@@ -378,7 +378,7 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         <span>Yêu cầu khởi chạy Dịch vụ Cơ sở Dữ liệu</span>
       </div>
-      <p id="instruction-text">Ứng dụng phát hiện PostgreSQL, Redis hoặc MinIO chưa hoạt động. Vui lòng mở Docker Desktop và chạy lệnh sau trong thư mục dự án:</p>
+      <p id="instruction-text" style="white-space: pre-line;">Ứng dụng phát hiện PostgreSQL, Redis hoặc MinIO chưa hoạt động. Vui lòng mở Docker Desktop và chạy lệnh sau trong thư mục dự án:</p>
       <code style="display: block; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; margin-top: 8px; font-family: monospace; color: var(--cyan-neon);">docker compose up -d postgres redis minio</code>
     </div>
 
@@ -395,7 +395,16 @@
 
   <script>
     // Nhận cập nhật trạng thái từ main process thông qua IPC Bridge
+    let latestErrors = {};
+
     if (window.electronAPI) {
+      // Lưu thông điệp lỗi chi tiết theo từng dịch vụ
+      if (window.electronAPI.onServiceError) {
+        window.electronAPI.onServiceError((event, errors) => {
+          latestErrors = errors || {};
+        });
+      }
+
       window.electronAPI.onServiceUpdate((event, data) => {
         updateServiceUI('postgres', data.postgres);
         updateServiceUI('redis', data.redis);
@@ -408,14 +417,24 @@
 
         if (hasDbOffline) {
           document.getElementById('instruction-box').style.display = 'block';
+          document.querySelector('#instruction-box .instruction-title span').innerText = 'Yêu cầu khởi chạy Dịch vụ Cơ sở Dữ liệu';
+          document.getElementById('instruction-text').innerText = 'Ứng dụng phát hiện PostgreSQL, Redis hoặc MinIO chưa hoạt động. Vui lòng mở Docker Desktop và chạy lệnh sau trong thư mục dự án:';
           document.getElementById('action-btn').style.display = 'block';
           document.getElementById('action-btn').innerText = 'Thử kết nối lại';
           document.getElementById('loading-bar').style.display = 'none';
           document.getElementById('footer-desc').innerText = 'Cơ sở dữ liệu đang ngoại tuyến. Vui lòng khởi động các container Docker.';
         } else if (hasServiceError) {
+          // Ghép thông điệp lỗi chi tiết từ main process (nếu có)
+          const detailParts = [];
+          if (data.api === 'error' && latestErrors.api) detailParts.push('• API: ' + latestErrors.api);
+          if (data.web === 'error' && latestErrors.web) detailParts.push('• Web: ' + latestErrors.web);
+          const detailMsg = detailParts.length
+            ? detailParts.join('\n')
+            : 'Không thể khởi động NestJS API hoặc Next.js Web Server. Vui lòng kiểm tra cổng 3001 và 3005 trên máy.';
+
           document.getElementById('instruction-box').style.display = 'block';
-          document.getElementById('instruction-title').innerText = 'Lỗi Khởi động Ứng dụng';
-          document.getElementById('instruction-text').innerText = 'Không thể khởi động NestJS API hoặc Next.js Web Server. Vui lòng kiểm tra cổng 3001 và 3005 trên máy.';
+          document.querySelector('#instruction-box .instruction-title span').innerText = 'Lỗi Khởi động Ứng dụng';
+          document.getElementById('instruction-text').innerText = detailMsg;
           document.getElementById('action-btn').style.display = 'block';
           document.getElementById('action-btn').innerText = 'Chạy lại Dịch vụ Ngầm';
           document.getElementById('loading-bar').style.display = 'none';

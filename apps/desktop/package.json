@@ -1,13 +1,14 @@
 {
   "name": "@auto-post/desktop",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Premium Multi-Platform Auto-Posting SaaS Desktop App",
   "author": "IzziAPI Dev Team",
   "private": true,
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build-win": "electron-builder --win nsis"
+    "generate-config": "node generate-config.js",
+    "build-win": "node generate-config.js && electron-builder --win nsis"
   },
   "dependencies": {},
   "devDependencies": {
@@ -46,6 +47,7 @@
       "main.js",
       "preload.js",
       "launcher.html",
+      "app-config.json",
       "build/**/*"
     ]
   }

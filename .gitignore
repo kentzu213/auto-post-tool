@@ -139,6 +139,9 @@ apps/desktop/dist-win/
 apps/desktop/dist/
 *.blockmap
 
+# Electron build-time generated config (machine-specific absolute path)
+apps/desktop/app-config.json
+
 # User uploads & media test files
 apps/api/uploads/
 
