@@ -29,9 +29,9 @@ COPY . .
 WORKDIR /app/apps/worker
 RUN pnpm exec prisma generate --schema=./prisma/schema.prisma
 
-# Build dự án Worker qua Turborepo
+# Build dự án Worker qua Turborepo (build dependencies first via the `...` suffix).
 WORKDIR /app
-RUN pnpm --filter @auto-post/worker build
+RUN pnpm --filter @auto-post/worker... build
 
 # --- Stage 2: Runner ---
 FROM ${NODE_IMAGE} AS runner

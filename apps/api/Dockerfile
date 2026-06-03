@@ -30,9 +30,10 @@ COPY . .
 WORKDIR /app/apps/api
 RUN pnpm exec prisma generate --schema=./prisma/schema.prisma
 
-# Build dự án API qua Turborepo
+# Build dự án API qua Turborepo (build dependencies first via the `...` suffix,
+# so workspace packages like @auto-post/shared-types are compiled before the API).
 WORKDIR /app
-RUN pnpm --filter @auto-post/api build
+RUN pnpm --filter @auto-post/api... build
 
 # --- Stage 2: Runner ---
 FROM ${NODE_IMAGE} AS runner

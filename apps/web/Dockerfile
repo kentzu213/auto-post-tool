@@ -33,8 +33,8 @@ COPY . .
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
-# Build dự án NextJS qua Turborepo
-RUN pnpm --filter @auto-post/web build
+# Build dự án NextJS qua Turborepo (build dependencies first via the `...` suffix).
+RUN pnpm --filter @auto-post/web... build
 
 # --- Stage 2: Runner ---
 FROM ${NODE_IMAGE} AS runner
