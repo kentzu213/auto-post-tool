@@ -1,0 +1,3 @@
+# Keep apps/web/public present so the web Dockerfile runner stage
+# (COPY --from=builder /app/apps/web/public ...) always finds it.
+# Next.js does not require a public/ dir, but the multi-stage image copies it.
