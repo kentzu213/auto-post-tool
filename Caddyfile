@@ -1,0 +1,49 @@
+# Caddyfile — Reverse_Proxy for Izzi Auto Post (SaaS production deployment)
+#
+# This file is configuration only. It is consumed by the `caddy` service that is
+# added to docker-compose.prod.yml in task 5.2 (later). Do not expect it to do
+# anything until that service mounts it read-only and provides the persistent
+# /data volume.
+#
+# Caddy gives us several production behaviours with zero extra code:
+#   - Automatic TLS via ACME on first start for each named host        (Req 5.1, 5.2)
+#   - Automatic HTTP :80 -> HTTPS :443 redirect for every site         (Req 4.3)
+#   - Automatic WebSocket / connection-upgrade passthrough on proxies  (Req 4.4)
+#   - Expired-cert auto-recovery: issuance/renewal is driven by Caddy's
+#     own maintenance loop (not an external cron that can wedge), so an
+#     already-expired cert is re-ordered automatically and HTTPS is
+#     restored with no operator action                                 (Req 5.3)
+#   - ACME retried on a recurring backoff until it succeeds            (Req 5.4)
+#   - New certs hot-loaded into the running listener, no restart       (Req 5.5)
+#   - Certs + ACME account persist on the /data volume mounted by the
+#     compose `caddy` service, surviving container recreation          (Req 5.6, wired in task 5.2)
+#
+# Placeholder domains (app.example.com / api.example.com) and the ACME contact
+# email below are intentionally placeholders — replace them with the real
+# production hostnames and ops email before deploying.
+
+{
+	# ACME account contact email — PLACEHOLDER, replace with the real ops email.
+	email ops@example.com
+}
+
+# Web_Service virtual host (Req 4.1, 4.2) — proxies to the Next.js container.
+app.example.com {
+	encode gzip zstd
+	reverse_proxy web:3000 {
+		# Forwarded headers so the upstream builds correct external URLs (Req 4.5).
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+}
+
+# API_Service virtual host (Req 4.1, 4.2) — proxies to the NestJS container.
+api.example.com {
+	encode gzip zstd
+	reverse_proxy api:3001 {
+		# Forwarded headers so the upstream builds correct external URLs (Req 4.5).
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+		# WebSocket / long-poll upgrades pass through automatically (Req 4.4).
+	}
+}

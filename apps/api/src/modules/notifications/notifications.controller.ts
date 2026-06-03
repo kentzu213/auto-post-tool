@@ -1,6 +1,7 @@
 import { Controller, Get, Patch, Query, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiBearerAuth } from '@nestjs/swagger';
 import { NotificationsService } from './notifications.service';
+import { CurrentUser } from '../auth/decorators/auth-context.decorators';
 
 @ApiTags('notifications')
 @ApiBearerAuth()
@@ -10,13 +11,12 @@ export class NotificationsController {
 
   @Get()
   @ApiOperation({ summary: 'Lấy danh sách notifications' })
-  @ApiQuery({ name: 'userId', required: true })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   @ApiQuery({ name: 'unreadOnly', required: false, type: Boolean })
   @ApiResponse({ status: 200, description: 'Danh sách notifications.' })
   async findAll(
-    @Query('userId') userId: string,
+    @CurrentUser() userId: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('unreadOnly') unreadOnly?: string,
@@ -31,9 +31,8 @@ export class NotificationsController {
 
   @Get('unread-count')
   @ApiOperation({ summary: 'Số notification chưa đọc' })
-  @ApiQuery({ name: 'userId', required: true })
   @ApiResponse({ status: 200, description: 'Số unread.' })
-  async getUnreadCount(@Query('userId') userId: string) {
+  async getUnreadCount(@CurrentUser() userId: string) {
     return this.notificationsService.getUnreadCount(userId);
   }
 
@@ -41,15 +40,14 @@ export class NotificationsController {
   @ApiOperation({ summary: 'Đánh dấu notification đã đọc' })
   @ApiParam({ name: 'id', description: 'Notification ID' })
   @ApiResponse({ status: 200, description: 'Đã đánh dấu đọc.' })
-  async markAsRead(@Param('id') id: string) {
-    return this.notificationsService.markAsRead(id);
+  async markAsRead(@CurrentUser() userId: string, @Param('id') id: string) {
+    return this.notificationsService.markAsRead(userId, id);
   }
 
   @Patch('mark-all-read')
   @ApiOperation({ summary: 'Đánh dấu tất cả đã đọc' })
-  @ApiQuery({ name: 'userId', required: true })
   @ApiResponse({ status: 200, description: 'Tất cả đã đọc.' })
-  async markAllAsRead(@Query('userId') userId: string) {
+  async markAllAsRead(@CurrentUser() userId: string) {
     return this.notificationsService.markAllAsRead(userId);
   }
 }

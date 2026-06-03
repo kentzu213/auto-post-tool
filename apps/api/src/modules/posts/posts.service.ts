@@ -1,6 +1,7 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
+import { TenantScopeService } from '../auth/authorization/tenant-scope.service';
 import { CreatePostDto, ContentType } from './dto/create-post.dto';
 import { UpdatePostDto } from './dto/update-post.dto';
 import { PostStatus, Platform } from '@prisma/client';
@@ -12,25 +13,29 @@ export class PostsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly schedulerService: SchedulerService,
+    private readonly tenantScope: TenantScopeService,
   ) {}
 
   /**
    * Tạo bài viết mới + tự động tạo Schedule records + enqueue BullMQ jobs
    * 
    * Flow: CreatePost → MediaAssets → Schedule(per account) → BullMQ delayed jobs
+   *
+   * `workspaceId` is the server-derived Active_Workspace (verified membership),
+   * NOT a client-supplied value — the membership guard guarantees it exists and the
+   * principal belongs to it (Req 2.3, 3.3).
    */
-  async create(dto: CreatePostDto) {
-    this.logger.log(`📝 Tạo bài viết mới cho workspace ${dto.workspaceId}...`);
+  async create(workspaceId: string, dto: CreatePostDto) {
+    this.logger.log(`📝 Tạo bài viết mới cho workspace ${workspaceId}...`);
 
-    // 0. Resolve workspace — ensure it exists (creates if needed)
-    const resolvedWorkspaceId = await this.ensureWorkspace(dto.workspaceId);
-
-    // 1. Validate social accounts nếu có
+    // 1. Validate social accounts nếu có — scope theo workspace để không thể đính kèm
+    //    tài khoản của tenant khác (Req 5.7).
     if (dto.socialAccountIds && dto.socialAccountIds.length > 0) {
       const accounts = await this.prisma.socialAccount.findMany({
         where: {
           id: { in: dto.socialAccountIds },
           status: 'active',
+          workspaceId,
         },
       });
 
@@ -41,6 +46,24 @@ export class PostsService {
           `Không tìm thấy hoặc tài khoản không active: ${missingIds.join(', ')}`
         );
       }
+    }
+
+    // 1b. Validate Campaign cha nếu có — phải tồn tại VÀ thuộc Active_Workspace,
+    //     ngược lại trả 404 (cross-tenant không phân biệt với not-found) và không tạo
+    //     gì cả (Req 5.7, 5.8).
+    if (dto.campaignId) {
+      const campaignId = dto.campaignId;
+      await this.tenantScope.requireOwned({
+        findScoped: () =>
+          this.prisma.campaign.findFirst({
+            where: { id: campaignId, workspaceId },
+          }),
+        findUnscopedExists: () =>
+          this.prisma.campaign.findUnique({ where: { id: campaignId } }).then(Boolean),
+        workspaceId,
+        resourceType: 'Campaign',
+        resourceId: campaignId,
+      });
     }
 
     // 2. Xác định trạng thái ban đầu của bài viết
@@ -55,7 +78,7 @@ export class PostsService {
       // Tạo Post
       const post = await tx.post.create({
         data: {
-          workspaceId: resolvedWorkspaceId,
+          workspaceId,
           title: dto.title,
           content: dto.content,
           campaignId: dto.campaignId,
@@ -71,7 +94,7 @@ export class PostsService {
             postId: post.id,
             url,
             type: url.match(/\.(mp4|mov|avi|webm)$/i) ? 'video' : 'image',
-            key: `uploads/${dto.workspaceId}/${post.id}/media_${index}`,
+            key: `uploads/${workspaceId}/${post.id}/media_${index}`,
           })),
         });
       }
@@ -81,7 +104,7 @@ export class PostsService {
 
       if (dto.socialAccountIds && dto.socialAccountIds.length > 0) {
         const accounts = await tx.socialAccount.findMany({
-          where: { id: { in: dto.socialAccountIds } },
+          where: { id: { in: dto.socialAccountIds }, workspaceId },
           select: { id: true, platform: true },
         });
 
@@ -122,7 +145,7 @@ export class PostsService {
     );
 
     // 5. Trả về post đầy đủ với relations
-    return this.findOne(result.post.id);
+    return this.findOne(workspaceId, result.post.id);
   }
 
   /**
@@ -176,41 +199,48 @@ export class PostsService {
   }
 
   /**
-   * Lấy chi tiết 1 bài viết
+   * Lấy chi tiết 1 bài viết (scoped theo Active_Workspace)
+   *
+   * Một id thuộc tenant khác trả về 404 không phân biệt được với not-found (Req 5.1, 5.2, 9.3).
    */
-  async findOne(id: string) {
-    const post = await this.prisma.post.findUnique({
-      where: { id },
-      include: {
-        mediaAssets: true,
-        schedules: {
+  async findOne(workspaceId: string, id: string) {
+    return this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.post.findFirst({
+          where: { id, workspaceId },
           include: {
-            socialAccount: {
-              select: { id: true, platform: true, displayName: true, avatarUrl: true },
+            mediaAssets: true,
+            schedules: {
+              include: {
+                socialAccount: {
+                  select: { id: true, platform: true, displayName: true, avatarUrl: true },
+                },
+                analytics: true,
+              },
             },
-            analytics: true,
+            campaign: { select: { id: true, name: true } },
           },
-        },
-        campaign: { select: { id: true, name: true } },
-      },
+        }),
+      findUnscopedExists: () =>
+        this.prisma.post.findUnique({ where: { id } }).then(Boolean),
+      workspaceId,
+      resourceType: 'Post',
+      resourceId: id,
     });
-
-    if (!post) {
-      throw new NotFoundException(`Không tìm thấy bài viết với ID: ${id}`);
-    }
-
-    return post;
   }
 
   /**
    * Cập nhật bài viết (chỉ cho phép khi status = draft hoặc scheduled)
    */
-  async update(id: string, dto: UpdatePostDto) {
-    const post = await this.prisma.post.findUnique({ where: { id } });
-
-    if (!post) {
-      throw new NotFoundException(`Không tìm thấy bài viết với ID: ${id}`);
-    }
+  async update(workspaceId: string, id: string, dto: UpdatePostDto) {
+    const post = await this.tenantScope.requireOwned({
+      findScoped: () => this.prisma.post.findFirst({ where: { id, workspaceId } }),
+      findUnscopedExists: () =>
+        this.prisma.post.findUnique({ where: { id } }).then(Boolean),
+      workspaceId,
+      resourceType: 'Post',
+      resourceId: id,
+    });
 
     if (post.status === PostStatus.published || post.status === PostStatus.publishing) {
       throw new BadRequestException(
@@ -247,18 +277,21 @@ export class PostsService {
     }
 
     this.logger.log(`✅ Bài viết ${id} đã cập nhật thành công.`);
-    return this.findOne(id);
+    return this.findOne(workspaceId, id);
   }
 
   /**
    * Xóa bài viết (cascade xóa schedules, mediaAssets, analytics)
    */
-  async delete(id: string) {
-    const post = await this.prisma.post.findUnique({ where: { id } });
-
-    if (!post) {
-      throw new NotFoundException(`Không tìm thấy bài viết với ID: ${id}`);
-    }
+  async delete(workspaceId: string, id: string) {
+    const post = await this.tenantScope.requireOwned({
+      findScoped: () => this.prisma.post.findFirst({ where: { id, workspaceId } }),
+      findUnscopedExists: () =>
+        this.prisma.post.findUnique({ where: { id } }).then(Boolean),
+      workspaceId,
+      resourceType: 'Post',
+      resourceId: id,
+    });
 
     // Chỉ cho phép xóa draft hoặc failed
     if (post.status === PostStatus.publishing) {
@@ -286,46 +319,5 @@ export class PostsService {
     ]);
 
     return { total, draft, scheduled, published, failed };
-  }
-
-  /**
-   * Ensure workspace exists — create demo workspace if needed
-   * Replicates logic from SocialAuthService for consistency
-   */
-  private async ensureWorkspace(workspaceId: string): Promise<string> {
-    const existing = await this.prisma.workspace.findUnique({
-      where: { id: workspaceId },
-    });
-
-    if (existing) return workspaceId;
-
-    // Try to find any existing workspace (the one direct-connect created)
-    const anyWorkspace = await this.prisma.workspace.findFirst({
-      orderBy: { createdAt: 'desc' },
-    });
-    if (anyWorkspace) {
-      this.logger.log(`[ensureWorkspace] Workspace "${workspaceId}" not found, using existing workspace "${anyWorkspace.name}" (${anyWorkspace.id})`);
-      return anyWorkspace.id;
-    }
-
-    // Last resort: create a new demo workspace
-    this.logger.log(`[ensureWorkspace] Tạo Demo workspace...`);
-    const bcrypt = await import('bcrypt');
-    const hashedPassword = await bcrypt.hash('demo123456', 10);
-    
-    let demoUser = await this.prisma.user.findUnique({
-      where: { email: 'demo@autopost.local' },
-    });
-    if (!demoUser) {
-      demoUser = await this.prisma.user.create({
-        data: { email: 'demo@autopost.local', password: hashedPassword, name: 'Demo User' },
-      });
-    }
-
-    const workspace = await this.prisma.workspace.create({
-      data: { name: 'Demo Workspace', ownerId: demoUser.id },
-    });
-
-    return workspace.id;
   }
 }

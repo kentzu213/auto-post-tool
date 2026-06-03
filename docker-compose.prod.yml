@@ -1,30 +1,61 @@
-version: '3.8'
+# Production topology (Req 4.6 / 5.x / 7.x): Caddy is the ONLY service that binds host
+# ports (80/443). Data services (postgres/redis/minio) and the app services (api/web) have
+# NO host ports — they are reachable only by service name on autopost_prod_net. Caddy
+# reverse-proxies web:3000 / api:3001. The `version:` top key is intentionally omitted
+# (Compose v2 treats it as obsolete).
 
 services:
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: autopost_prod_caddy
+    restart: always
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - autopost_prod_net
+
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine
     container_name: autopost_prod_postgres
     restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-autopost}
-    ports:
-      - '5432:5432'
     volumes:
       - postgres_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-autopost}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - autopost_prod_net
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: autopost_prod_redis
     restart: always
-    command: redis-server --save 60 1 --loglevel warning
-    ports:
-      - '6379:6379'
+    command: redis-server --appendonly yes --appendfsync everysec --save 60 1 --loglevel warning
     volumes:
       - redis_prod_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     networks:
       - autopost_prod_net
 
@@ -32,9 +63,6 @@ services:
     image: minio/minio:RELEASE.2024-02-09T02-33-46Z
     container_name: autopost_prod_minio
     restart: always
-    ports:
-      - '9000:9000'
-      - '9001:9001'
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
@@ -42,6 +70,35 @@ services:
     volumes:
       - minio_prod_data:/data
       - minio_prod_config:/root/.minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - autopost_prod_net
+
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args:
+        COMMIT_SHA: ${COMMIT_SHA:-}
+        BUILD_ID: ${BUILD_ID:-}
+    container_name: autopost_prod_migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["node_modules/.bin/prisma", "migrate", "deploy", "--schema=apps/api/prisma/schema.prisma"]
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-autopost}?schema=public"
     networks:
       - autopost_prod_net
 
@@ -49,13 +106,16 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+      args:
+        COMMIT_SHA: ${COMMIT_SHA:-}
+        BUILD_ID: ${BUILD_ID:-}
     container_name: autopost_prod_api
     restart: always
     depends_on:
-      - postgres
-      - redis
-    ports:
-      - '3001:3001'
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -66,6 +126,12 @@ services:
       REDIS_PORT: 6379
       S3_ENDPOINT: "http://minio:9000"
       S3_FORCE_PATH_STYLE: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3001/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     networks:
       - autopost_prod_net
 
@@ -73,11 +139,16 @@ services:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
+      args:
+        COMMIT_SHA: ${COMMIT_SHA:-}
+        BUILD_ID: ${BUILD_ID:-}
     container_name: autopost_prod_worker
     restart: always
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -85,6 +156,8 @@ services:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-autopost}?schema=public"
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      S3_ENDPOINT: "http://minio:9000"
+      S3_FORCE_PATH_STYLE: "true"
     networks:
       - autopost_prod_net
 
@@ -92,15 +165,73 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        COMMIT_SHA: ${COMMIT_SHA:-}
+        BUILD_ID: ${BUILD_ID:-}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
     container_name: autopost_prod_web
     restart: always
     depends_on:
-      - api
-    ports:
-      - '3000:3000'
+      api:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: 3000
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - autopost_prod_net
+
+  # Scheduled Backup_Job (Req 13.1, 13.2): runs scripts/backup.sh on a daily cadence,
+  # writing to the dedicated `backups` volume kept OFF the primary data volumes
+  # (postgres_prod_data / minio_prod_data). Uses postgres:16.4-alpine so pg_dump matches
+  # the DB major version (16) for dump compatibility; the MinIO `mc` client (for the media
+  # mirror) and bash (backup.sh needs bash features) are installed at container start.
+  # No host ports are published. Internal-only on autopost_prod_net.
+  backup:
+    image: postgres:16.4-alpine
+    container_name: autopost_prod_backup
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    env_file:
+      # Supplies S3_ACCESS_KEY / S3_SECRET_KEY / S3_BUCKET_NAME (+ S3_REGION) — no secrets here.
+      - .env
+    environment:
+      # libpq-compatible DSN: pg_dump rejects Prisma's `?schema=public` query param, so the
+      # backup DATABASE_URL is the bare URL (a full dump covers the public schema anyway).
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-autopost}"
+      S3_ENDPOINT: "http://minio:9000"
+      BACKUP_DIR: /backups
+      RETENTION_DAYS: ${RETENTION_DAYS:-7}
+      BACKUP_ALERT_WEBHOOK_URL: ${BACKUP_ALERT_WEBHOOK_URL:-}
+    volumes:
+      - ./scripts/backup.sh:/scripts/backup.sh:ro
+      - backups:/backups
+    # Simple sleep-loop scheduler (acceptable per task): bootstrap deps, then run once per
+    # 24h from container start. Tradeoff vs in-container cron: no fixed wall-clock time
+    # (e.g. 03:00), but the daily cadence (Req 13.1/13.2) is met.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        apk add --no-cache bash ca-certificates curl >/dev/null 2>&1
+        if ! command -v mc >/dev/null 2>&1; then
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+        fi
+        while true; do
+          bash /scripts/backup.sh || true
+          sleep 86400
+        done
     networks:
       - autopost_prod_net
 
@@ -109,6 +240,9 @@ volumes:
   redis_prod_data:
   minio_prod_data:
   minio_prod_config:
+  caddy_data:
+  caddy_config:
+  backups:
 
 networks:
   autopost_prod_net:

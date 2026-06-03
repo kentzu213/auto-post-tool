@@ -1,18 +1,22 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { TenantScopeService } from '../auth/authorization/tenant-scope.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
 
 @Injectable()
 export class CampaignsService {
   private readonly logger = new Logger(CampaignsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenantScope: TenantScopeService,
+  ) {}
 
-  async create(dto: CreateCampaignDto) {
+  async create(workspaceId: string, dto: CreateCampaignDto) {
     this.logger.log(`📋 Tạo campaign mới: ${dto.name}`);
     return this.prisma.campaign.create({
       data: {
-        workspaceId: dto.workspaceId,
+        workspaceId,
         name: dto.name,
         description: dto.description,
         kpiTarget: dto.kpiTarget,
@@ -35,31 +39,35 @@ export class CampaignsService {
     });
   }
 
-  async findOne(id: string) {
-    const campaign = await this.prisma.campaign.findUnique({
-      where: { id },
-      include: {
-        posts: {
+  async findOne(workspaceId: string, id: string) {
+    const campaign = await this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.campaign.findFirst({
+          where: { id, workspaceId },
           include: {
-            mediaAssets: true,
-            schedules: {
+            posts: {
               include: {
-                socialAccount: {
-                  select: { id: true, platform: true, displayName: true },
+                mediaAssets: true,
+                schedules: {
+                  include: {
+                    socialAccount: {
+                      select: { id: true, platform: true, displayName: true },
+                    },
+                    analytics: true,
+                  },
                 },
-                analytics: true,
               },
+              orderBy: { createdAt: 'desc' },
             },
+            _count: { select: { posts: true } },
           },
-          orderBy: { createdAt: 'desc' },
-        },
-        _count: { select: { posts: true } },
-      },
+        }),
+      findUnscopedExists: () =>
+        this.prisma.campaign.findUnique({ where: { id } }).then(Boolean),
+      workspaceId,
+      resourceType: 'Campaign',
+      resourceId: id,
     });
-
-    if (!campaign) {
-      throw new NotFoundException(`Không tìm thấy campaign với ID: ${id}`);
-    }
 
     // Tính tổng KPI thực tế từ analytics
     let totalReach = 0, totalEngagement = 0, totalViews = 0;
@@ -79,11 +87,16 @@ export class CampaignsService {
     };
   }
 
-  async update(id: string, data: Partial<CreateCampaignDto>) {
-    const exists = await this.prisma.campaign.findUnique({ where: { id } });
-    if (!exists) {
-      throw new NotFoundException(`Không tìm thấy campaign với ID: ${id}`);
-    }
+  async update(workspaceId: string, id: string, data: Partial<CreateCampaignDto>) {
+    await this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.campaign.findFirst({ where: { id, workspaceId } }),
+      findUnscopedExists: () =>
+        this.prisma.campaign.findUnique({ where: { id } }).then(Boolean),
+      workspaceId,
+      resourceType: 'Campaign',
+      resourceId: id,
+    });
 
     return this.prisma.campaign.update({
       where: { id },
@@ -95,11 +108,16 @@ export class CampaignsService {
     });
   }
 
-  async delete(id: string) {
-    const exists = await this.prisma.campaign.findUnique({ where: { id } });
-    if (!exists) {
-      throw new NotFoundException(`Không tìm thấy campaign với ID: ${id}`);
-    }
+  async delete(workspaceId: string, id: string) {
+    await this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.campaign.findFirst({ where: { id, workspaceId } }),
+      findUnscopedExists: () =>
+        this.prisma.campaign.findUnique({ where: { id } }).then(Boolean),
+      workspaceId,
+      resourceType: 'Campaign',
+      resourceId: id,
+    });
 
     await this.prisma.campaign.delete({ where: { id } });
     return { deleted: true, id };

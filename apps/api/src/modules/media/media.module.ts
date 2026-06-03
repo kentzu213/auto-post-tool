@@ -1,5 +1,6 @@
 import { Module, Global } from '@nestjs/common';
 import { MediaService } from './media.service';
+import { StorageService } from './storage.service';
 import { MediaController } from './media.controller';
 import { BullModule } from '@nestjs/bullmq';
 
@@ -11,8 +12,8 @@ import { BullModule } from '@nestjs/bullmq';
     }),
   ],
   controllers: [MediaController],
-  providers: [MediaService],
-  exports: [MediaService],
+  providers: [MediaService, StorageService],
+  exports: [MediaService, StorageService],
 })
 export class MediaModule {}
 

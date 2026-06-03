@@ -2,6 +2,7 @@ import { Controller, Get, Patch, Post, Query, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiBearerAuth } from '@nestjs/swagger';
 import { InboxService } from './inbox.service';
 import { InboxIngestionService } from './inbox-ingestion.service';
+import { ActiveWorkspace } from '../auth/decorators/auth-context.decorators';
 import { Platform } from '@prisma/client';
 
 @ApiTags('inbox')
@@ -18,14 +19,13 @@ export class InboxController {
     summary: 'Unified Inbox — Lấy tin nhắn từ tất cả MXH',
     description: 'Lấy danh sách tin nhắn/comment từ tất cả tài khoản Facebook, YouTube, TikTok.',
   })
-  @ApiQuery({ name: 'workspaceId', required: true })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   @ApiQuery({ name: 'platform', required: false, enum: Platform })
   @ApiQuery({ name: 'unreadOnly', required: false, type: Boolean })
   @ApiResponse({ status: 200, description: 'Danh sách tin nhắn kèm phân trang.' })
   async getMessages(
-    @Query('workspaceId') workspaceId: string,
+    @ActiveWorkspace() workspaceId: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('platform') platform?: Platform,
@@ -45,9 +45,8 @@ export class InboxController {
     summary: 'Số tin nhắn chưa đọc',
     description: 'Trả về tổng unread + breakdown theo platform.',
   })
-  @ApiQuery({ name: 'workspaceId', required: true })
   @ApiResponse({ status: 200, description: 'Thống kê unread.' })
-  async getUnreadCounts(@Query('workspaceId') workspaceId: string) {
+  async getUnreadCounts(@ActiveWorkspace() workspaceId: string) {
     return this.inboxService.getUnreadCounts(workspaceId);
   }
 
@@ -55,15 +54,14 @@ export class InboxController {
   @ApiOperation({ summary: 'Đánh dấu tin nhắn đã đọc' })
   @ApiParam({ name: 'id', description: 'Message ID' })
   @ApiResponse({ status: 200, description: 'Tin nhắn đã đánh dấu đọc.' })
-  async markAsRead(@Param('id') id: string) {
-    return this.inboxService.markAsRead(id);
+  async markAsRead(@ActiveWorkspace() workspaceId: string, @Param('id') id: string) {
+    return this.inboxService.markAsRead(workspaceId, id);
   }
 
   @Patch('mark-all-read')
   @ApiOperation({ summary: 'Đánh dấu tất cả tin nhắn đã đọc' })
-  @ApiQuery({ name: 'workspaceId', required: true })
   @ApiResponse({ status: 200, description: 'Tất cả đã đánh dấu đọc.' })
-  async markAllAsRead(@Query('workspaceId') workspaceId: string) {
+  async markAllAsRead(@ActiveWorkspace() workspaceId: string) {
     return this.inboxService.markAllAsRead(workspaceId);
   }
 
@@ -74,9 +72,8 @@ export class InboxController {
       'Poll Facebook Messenger + YouTube comment threads cho các tài khoản active của workspace và upsert vào inbox. ' +
       'Token mock bị bỏ qua (không tạo dữ liệu giả). TikTok đang gated do giới hạn API.',
   })
-  @ApiQuery({ name: 'workspaceId', required: true })
   @ApiResponse({ status: 200, description: 'Tổng kết quá trình đồng bộ.' })
-  async sync(@Query('workspaceId') workspaceId: string) {
+  async sync(@ActiveWorkspace() workspaceId: string) {
     return this.ingestionService.syncWorkspace(workspaceId);
   }
 }

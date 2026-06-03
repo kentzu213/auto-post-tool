@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Izzi Auto Post Launcher</title>
+  <title>Izzi Auto Post — Cấu hình máy chủ</title>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@200;400;600&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -14,17 +14,9 @@
       --text-muted: #64748b;
       --cyan-neon: #67e8f9;
       --violet-neon: #a78bfa;
-      --success: #10b981;
-      --warning: #f59e0b;
-      --error: #ef4444;
     }
 
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      user-select: none;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       font-family: 'Outfit', sans-serif;
@@ -38,7 +30,6 @@
       position: relative;
     }
 
-    /* Background Neon Glow */
     .glow-bg {
       position: absolute;
       width: 400px;
@@ -58,23 +49,20 @@
       100% { transform: translate(-50%, -50%) scale(1.1); opacity: 1; }
     }
 
-    /* Container Glassmorphism */
     .launcher-card {
-      width: 580px;
+      width: 480px;
       padding: 40px;
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       border-radius: 24px;
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
-      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5), 
-                  inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
       z-index: 10;
       text-align: center;
       position: relative;
     }
 
-    /* Custom Header drag region */
     .drag-region {
       position: absolute;
       top: 0;
@@ -84,21 +72,10 @@
       -webkit-app-region: drag;
     }
 
-    /* Logo Styling */
-    .logo-container {
-      margin-bottom: 24px;
-      display: inline-flex;
-      justify-content: center;
-      align-items: center;
-      position: relative;
-    }
-
-    .logo-svg {
-      filter: drop-shadow(0 0 12px rgba(103, 232, 249, 0.4));
-    }
+    .logo-svg { filter: drop-shadow(0 0 12px rgba(103, 232, 249, 0.4)); margin-bottom: 20px; }
 
     .app-title {
-      font-size: 24px;
+      font-size: 22px;
       font-weight: 600;
       letter-spacing: 0.15em;
       text-transform: uppercase;
@@ -109,177 +86,75 @@
     }
 
     .app-subtitle {
-      font-size: 11px;
+      font-size: 12px;
       color: var(--text-muted);
-      letter-spacing: 0.3em;
-      text-transform: uppercase;
-      margin-bottom: 35px;
+      margin-bottom: 28px;
       font-weight: 200;
+      line-height: 1.5;
     }
 
-    /* Services Grid */
-    .services-list {
-      margin-bottom: 35px;
-      background: rgba(0, 0, 0, 0.2);
-      border-radius: 16px;
-      border: 1px solid rgba(255, 255, 255, 0.03);
-      padding: 18px 22px;
-      text-align: left;
-    }
-
-    .service-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 10px 0;
-      border-bottom: 1px dashed rgba(255, 255, 255, 0.04);
-    }
-
-    .service-item:last-child {
-      border-bottom: none;
-    }
-
-    .service-name {
-      font-size: 13px;
-      font-weight: 400;
-      color: rgba(255, 255, 255, 0.7);
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .service-icon {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--text-muted);
-    }
-
-    .service-status {
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    /* Status Indicator Dot Styles */
-    .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      display: inline-block;
-    }
-
-    .dot.checking {
-      background: var(--text-muted);
-      box-shadow: 0 0 8px var(--text-muted);
-      animation: pulseDot 1s infinite alternate;
-    }
-
-    .dot.running {
-      background: var(--success);
-      box-shadow: 0 0 10px var(--success);
-    }
-
-    .dot.offline {
-      background: var(--warning);
-      box-shadow: 0 0 10px var(--warning);
-    }
-
-    .dot.error {
-      background: var(--error);
-      box-shadow: 0 0 10px var(--error);
-    }
-
-    @keyframes pulseDot {
-      0% { opacity: 0.4; }
-      100% { opacity: 1; }
-    }
-
-    /* Loading Line Bar */
-    .progress-container {
-      width: 100%;
-      height: 3px;
-      background: rgba(255, 255, 255, 0.03);
-      border-radius: 10px;
-      overflow: hidden;
-      margin-bottom: 24px;
-    }
-
-    .progress-bar {
-      width: 30%;
-      height: 100%;
-      background: linear-gradient(90deg, var(--cyan-neon), var(--violet-neon));
-      border-radius: 10px;
-      box-shadow: 0 0 10px var(--cyan-neon);
-      animation: loadingAnim 1.5s infinite ease-in-out;
-    }
-
-    @keyframes loadingAnim {
-      0% { transform: translateX(-100%); }
-      100% { transform: translateX(330%); }
-    }
-
-    /* Instruction Panel (Hidden by default, shown when error occurs) */
-    .instruction-panel {
-      display: none;
-      background: rgba(239, 68, 68, 0.05);
-      border: 1px solid rgba(239, 68, 68, 0.2);
-      border-radius: 12px;
-      padding: 16px;
-      margin-bottom: 20px;
+    .url-label {
+      display: block;
       text-align: left;
       font-size: 12px;
-      line-height: 1.6;
-      color: rgba(255,255,255,0.8);
+      color: rgba(255,255,255,0.7);
+      margin-bottom: 8px;
+      letter-spacing: 0.05em;
     }
 
-    .instruction-title {
-      font-weight: 600;
-      color: #fca5a5;
-      margin-bottom: 6px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    /* Custom Button */
-    .btn-action {
-      background: linear-gradient(135deg, rgba(103, 232, 249, 0.2) 0%, rgba(167, 139, 250, 0.2) 100%);
-      border: 1px solid rgba(103, 232, 249, 0.3);
+    .url-input {
+      width: 100%;
+      padding: 12px 14px;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
       color: var(--text-main);
-      padding: 12px 24px;
+      font-family: 'Outfit', sans-serif;
+      font-size: 14px;
+      outline: none;
+      margin-bottom: 20px;
+      transition: border-color 0.2s;
+    }
+
+    .url-input:focus { border-color: var(--cyan-neon); }
+
+    .btn-row { display: flex; gap: 12px; }
+
+    .btn {
+      flex: 1;
+      padding: 12px 16px;
       border-radius: 12px;
       font-size: 13px;
       font-weight: 600;
       cursor: pointer;
-      transition: all 0.3s;
+      transition: all 0.25s;
       outline: none;
-      display: none;
-      width: 100%;
       text-transform: uppercase;
-      letter-spacing: 0.1em;
+      letter-spacing: 0.08em;
+      border: 1px solid transparent;
     }
 
-    .btn-action:hover {
+    .btn-primary {
+      background: linear-gradient(135deg, rgba(103, 232, 249, 0.2) 0%, rgba(167, 139, 250, 0.2) 100%);
+      border-color: rgba(103, 232, 249, 0.3);
+      color: var(--text-main);
+    }
+
+    .btn-primary:hover {
       background: linear-gradient(135deg, rgba(103, 232, 249, 0.3) 0%, rgba(167, 139, 250, 0.3) 100%);
       border-color: var(--cyan-neon);
       box-shadow: 0 0 15px rgba(103, 232, 249, 0.2);
-      transform: translateY(-1px);
     }
 
-    .btn-action:active {
-      transform: translateY(1px);
-    }
-
-    .footer-text {
-      font-size: 11px;
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.03);
+      border-color: rgba(255, 255, 255, 0.1);
       color: var(--text-muted);
-      font-weight: 200;
     }
+
+    .btn-secondary:hover { color: var(--text-main); border-color: rgba(255,255,255,0.2); }
+
+    .hint { font-size: 11px; color: var(--text-muted); margin-top: 18px; font-weight: 200; }
   </style>
 </head>
 <body>
@@ -287,206 +162,64 @@
   <div class="glow-bg"></div>
 
   <div class="launcher-card">
-    <!-- Logo SVG -->
-    <div class="logo-container">
-      <svg class="logo-svg" width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <filter id="glow-svg" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur stdDeviation="3" result="blur"></feGaussianBlur>
-            <feComposite in="SourceGraphic" in2="blur" operator="over"></feComposite>
-          </filter>
-          <linearGradient id="neon-grad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="#67e8f9"></stop>
-            <stop offset="100%" stop-color="#a78bfa"></stop>
-          </linearGradient>
-        </defs>
-        <path d="M38 12c-6 0-14 2-14 10 0 6 5 8 10 10 5 2 10 3 10 8 0 7-8 12-16 12" stroke="url(#neon-grad)" stroke-width="4.5" stroke-linecap="round" fill="none" filter="url(#glow-svg)"></path>
-        <path d="M26 52c6 0 14-2 14-10 0-6-5-8-10-10-5-2-10-3-10-8 0-7 8-12 16-12" stroke="url(#neon-grad)" stroke-width="4.5" stroke-linecap="round" fill="none" filter="url(#glow-svg)"></path>
-        <path d="M18 14l1.5-3 1.5 3 3 0.5-2.2 2 0.7 3-3-1.5-3 1.5 0.7-3-2.2-2z" fill="#67e8f9" filter="url(#glow-svg)"></path>
-      </svg>
-    </div>
+    <svg class="logo-svg" width="56" height="56" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="glow-svg" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="3" result="blur"></feGaussianBlur>
+          <feComposite in="SourceGraphic" in2="blur" operator="over"></feComposite>
+        </filter>
+        <linearGradient id="neon-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#67e8f9"></stop>
+          <stop offset="100%" stop-color="#a78bfa"></stop>
+        </linearGradient>
+      </defs>
+      <path d="M38 12c-6 0-14 2-14 10 0 6 5 8 10 10 5 2 10 3 10 8 0 7-8 12-16 12" stroke="url(#neon-grad)" stroke-width="4.5" stroke-linecap="round" fill="none" filter="url(#glow-svg)"></path>
+      <path d="M26 52c6 0 14-2 14-10 0-6-5-8-10-10-5-2-10-3-10-8 0-7 8-12 16-12" stroke="url(#neon-grad)" stroke-width="4.5" stroke-linecap="round" fill="none" filter="url(#glow-svg)"></path>
+    </svg>
 
     <h1 class="app-title">Izzi Auto Post</h1>
-    <h2 class="app-subtitle">Nền tảng Tự động Đăng bài Đa kênh</h2>
+    <p class="app-subtitle">Nhập địa chỉ máy chủ đã được lưu trữ (hosted) để bắt đầu sử dụng.</p>
 
-    <!-- Services Status Tracker -->
-    <div class="services-list">
-      <!-- Database Postgres -->
-      <div class="service-item">
-        <div class="service-name">
-          <div class="service-icon" style="background-color: #336791;"></div>
-          <span>PostgreSQL Database</span>
-        </div>
-        <div class="service-status" id="status-postgres">
-          <span class="dot checking"></span>
-          <span style="color: var(--text-muted);">Đang kiểm tra...</span>
-        </div>
-      </div>
+    <label class="url-label" for="serverUrl">URL máy chủ</label>
+    <input id="serverUrl" class="url-input" type="text" placeholder="https://app.example.com" spellcheck="false" autocomplete="off" />
 
-      <!-- Redis Cache & Queue -->
-      <div class="service-item">
-        <div class="service-name">
-          <div class="service-icon" style="background-color: #d82c20;"></div>
-          <span>Redis Queue</span>
-        </div>
-        <div class="service-status" id="status-redis">
-          <span class="dot checking"></span>
-          <span style="color: var(--text-muted);">Đang kiểm tra...</span>
-        </div>
-      </div>
-
-      <!-- MinIO Media Storage -->
-      <div class="service-item">
-        <div class="service-name">
-          <div class="service-icon" style="background-color: #c72c48;"></div>
-          <span>MinIO S3 Storage</span>
-        </div>
-        <div class="service-status" id="status-minio">
-          <span class="dot checking"></span>
-          <span style="color: var(--text-muted);">Đang kiểm tra...</span>
-        </div>
-      </div>
-
-      <!-- NestJS API Server -->
-      <div class="service-item">
-        <div class="service-name">
-          <div class="service-icon" style="background-color: #e0234e;"></div>
-          <span>NestJS API Engine</span>
-        </div>
-        <div class="service-status" id="status-api">
-          <span class="dot checking"></span>
-          <span style="color: var(--text-muted);">Chờ kết nối...</span>
-        </div>
-      </div>
-
-      <!-- NextJS Web Dashboard -->
-      <div class="service-item">
-        <div class="service-name">
-          <div class="service-icon" style="background-color: #ffffff;"></div>
-          <span>Next.js Web Interface</span>
-        </div>
-        <div class="service-status" id="status-web">
-          <span class="dot checking"></span>
-          <span style="color: var(--text-muted);">Chờ kết nối...</span>
-        </div>
-      </div>
+    <div class="btn-row">
+      <button class="btn btn-secondary" id="cancelBtn">Dùng mặc định</button>
+      <button class="btn btn-primary" id="connectBtn">Kết nối</button>
     </div>
 
-    <!-- Instructions Panel (shows when services are offline) -->
-    <div class="instruction-panel" id="instruction-box">
-      <div class="instruction-title">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        <span>Yêu cầu khởi chạy Dịch vụ Cơ sở Dữ liệu</span>
-      </div>
-      <p id="instruction-text" style="white-space: pre-line;">Ứng dụng phát hiện PostgreSQL, Redis hoặc MinIO chưa hoạt động. Vui lòng mở Docker Desktop và chạy lệnh sau trong thư mục dự án:</p>
-      <code style="display: block; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; margin-top: 8px; font-family: monospace; color: var(--cyan-neon);">docker compose up -d postgres redis minio</code>
-    </div>
-
-    <!-- Animated Loading Line -->
-    <div class="progress-container" id="loading-bar">
-      <div class="progress-bar"></div>
-    </div>
-
-    <!-- Action Button (Retry or Open Docker) -->
-    <button class="btn-action" id="action-btn" onclick="handleActionClick()">Thử kết nối lại</button>
-
-    <div class="footer-text" id="footer-desc">Đang đồng bộ hóa hệ thống, vui lòng chờ trong giây lát...</div>
+    <p class="hint">Bạn có thể đổi URL này sau trong menu Tệp → Đổi URL máy chủ.</p>
   </div>
 
   <script>
-    // Nhận cập nhật trạng thái từ main process thông qua IPC Bridge
-    let latestErrors = {};
+    const input = document.getElementById('serverUrl');
+    const connectBtn = document.getElementById('connectBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
 
-    if (window.electronAPI) {
-      // Lưu thông điệp lỗi chi tiết theo từng dịch vụ
-      if (window.electronAPI.onServiceError) {
-        window.electronAPI.onServiceError((event, errors) => {
-          latestErrors = errors || {};
-        });
-      }
-
-      window.electronAPI.onServiceUpdate((event, data) => {
-        updateServiceUI('postgres', data.postgres);
-        updateServiceUI('redis', data.redis);
-        updateServiceUI('minio', data.minio);
-        updateServiceUI('api', data.api);
-        updateServiceUI('web', data.web);
-
-        const hasDbOffline = data.postgres === 'offline' || data.redis === 'offline' || data.minio === 'offline';
-        const hasServiceError = data.api === 'error' || data.web === 'error';
-
-        if (hasDbOffline) {
-          document.getElementById('instruction-box').style.display = 'block';
-          document.querySelector('#instruction-box .instruction-title span').innerText = 'Yêu cầu khởi chạy Dịch vụ Cơ sở Dữ liệu';
-          document.getElementById('instruction-text').innerText = 'Ứng dụng phát hiện PostgreSQL, Redis hoặc MinIO chưa hoạt động. Vui lòng mở Docker Desktop và chạy lệnh sau trong thư mục dự án:';
-          document.getElementById('action-btn').style.display = 'block';
-          document.getElementById('action-btn').innerText = 'Thử kết nối lại';
-          document.getElementById('loading-bar').style.display = 'none';
-          document.getElementById('footer-desc').innerText = 'Cơ sở dữ liệu đang ngoại tuyến. Vui lòng khởi động các container Docker.';
-        } else if (hasServiceError) {
-          // Ghép thông điệp lỗi chi tiết từ main process (nếu có)
-          const detailParts = [];
-          if (data.api === 'error' && latestErrors.api) detailParts.push('• API: ' + latestErrors.api);
-          if (data.web === 'error' && latestErrors.web) detailParts.push('• Web: ' + latestErrors.web);
-          const detailMsg = detailParts.length
-            ? detailParts.join('\n')
-            : 'Không thể khởi động NestJS API hoặc Next.js Web Server. Vui lòng kiểm tra cổng 3001 và 3005 trên máy.';
-
-          document.getElementById('instruction-box').style.display = 'block';
-          document.querySelector('#instruction-box .instruction-title span').innerText = 'Lỗi Khởi động Ứng dụng';
-          document.getElementById('instruction-text').innerText = detailMsg;
-          document.getElementById('action-btn').style.display = 'block';
-          document.getElementById('action-btn').innerText = 'Chạy lại Dịch vụ Ngầm';
-          document.getElementById('loading-bar').style.display = 'none';
-          document.getElementById('footer-desc').innerText = 'Có lỗi xảy ra khi khởi động dịch vụ Node.js.';
-        } else {
-          // Trở lại trạng thái tải
-          document.getElementById('instruction-box').style.display = 'none';
-          document.getElementById('action-btn').style.display = 'none';
-          document.getElementById('loading-bar').style.display = 'block';
-          document.getElementById('footer-desc').innerText = 'Hệ thống đã sẵn sàng, đang chuyển hướng vào bảng điều khiển...';
-        }
+    // Prefill with the documented default URL provided by the main process.
+    if (window.izziPrompt && window.izziPrompt.getDefault) {
+      window.izziPrompt.getDefault().then((def) => {
+        if (def && !input.value) input.value = def;
+        input.focus();
+        input.select();
       });
     }
 
-    function updateServiceUI(id, status) {
-      const statusElement = document.getElementById(`status-${id}`);
-      if (!statusElement) return;
-
-      let dotClass = 'checking';
-      let statusText = 'Đang kiểm tra...';
-      let textColor = 'var(--text-muted)';
-
-      if (status === 'running' || status === 'active') {
-        dotClass = 'running';
-        statusText = id === 'api' || id === 'web' ? 'Hoạt động' : 'Đã kết nối';
-        textColor = 'var(--success)';
-      } else if (status === 'offline') {
-        dotClass = 'offline';
-        statusText = 'Ngoại tuyến';
-        textColor = 'var(--warning)';
-      } else if (status === 'error') {
-        dotClass = 'error';
-        statusText = 'Lỗi';
-        textColor = 'var(--error)';
-      } else if (status === 'starting') {
-        dotClass = 'checking';
-        statusText = 'Đang khởi động...';
-        textColor = 'var(--cyan-neon)';
-      }
-
-      statusElement.innerHTML = `
-        <span class="dot ${dotClass}"></span>
-        <span style="color: ${textColor};">${statusText}</span>
-      `;
+    function submit() {
+      const value = input.value.trim();
+      if (window.izziPrompt) window.izziPrompt.submit(value);
     }
 
-    function handleActionClick() {
-      if (window.electronAPI) {
-        // Gửi thông điệp yêu cầu kiểm tra lại
-        window.electronAPI.retryServices();
-      }
+    function cancel() {
+      if (window.izziPrompt) window.izziPrompt.cancel();
     }
+
+    connectBtn.addEventListener('click', submit);
+    cancelBtn.addEventListener('click', cancel);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submit();
+      if (e.key === 'Escape') cancel();
+    });
   </script>
 </body>
 </html>

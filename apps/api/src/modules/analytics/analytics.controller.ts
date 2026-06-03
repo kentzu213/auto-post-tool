@@ -1,6 +1,7 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiBearerAuth } from '@nestjs/swagger';
 import { AnalyticsService } from './analytics.service';
+import { ActiveWorkspace } from '../auth/decorators/auth-context.decorators';
 import { Platform } from '@prisma/client';
 
 @ApiTags('analytics')
@@ -14,9 +15,8 @@ export class AnalyticsController {
     summary: 'Dashboard analytics tổng quan',
     description: 'Trả về tổng reach, impressions, engagement, views, clicks + phân bổ theo status/platform.',
   })
-  @ApiQuery({ name: 'workspaceId', required: true })
   @ApiResponse({ status: 200, description: 'Dữ liệu dashboard analytics.' })
-  async getDashboard(@Query('workspaceId') workspaceId: string) {
+  async getDashboard(@ActiveWorkspace() workspaceId: string) {
     return this.analyticsService.getDashboardSummary(workspaceId);
   }
 
@@ -27,8 +27,11 @@ export class AnalyticsController {
   })
   @ApiQuery({ name: 'scheduleId', required: true })
   @ApiResponse({ status: 200, description: 'Analytics chi tiết.' })
-  async getPostAnalytics(@Query('scheduleId') scheduleId: string) {
-    return this.analyticsService.getPostAnalytics(scheduleId);
+  async getPostAnalytics(
+    @ActiveWorkspace() workspaceId: string,
+    @Query('scheduleId') scheduleId: string,
+  ) {
+    return this.analyticsService.getPostAnalytics(workspaceId, scheduleId);
   }
 
   @Get('heatmap')
@@ -36,9 +39,8 @@ export class AnalyticsController {
     summary: 'Best Time to Post — Heatmap',
     description: 'Phân tích engagement theo giờ/ngày để xác định thời điểm đăng bài hiệu quả nhất.',
   })
-  @ApiQuery({ name: 'workspaceId', required: true })
   @ApiResponse({ status: 200, description: 'Heatmap data + top 5 time slots.' })
-  async getHeatmap(@Query('workspaceId') workspaceId: string) {
+  async getHeatmap(@ActiveWorkspace() workspaceId: string) {
     return this.analyticsService.getBestTimeHeatmap(workspaceId);
   }
 
@@ -47,11 +49,10 @@ export class AnalyticsController {
     summary: 'Analytics theo nền tảng',
     description: 'Lấy analytics tổng hợp cho 1 nền tảng cụ thể (facebook/youtube/tiktok).',
   })
-  @ApiQuery({ name: 'workspaceId', required: true })
   @ApiQuery({ name: 'platform', required: true, enum: Platform })
   @ApiResponse({ status: 200, description: 'Analytics theo platform.' })
   async getByPlatform(
-    @Query('workspaceId') workspaceId: string,
+    @ActiveWorkspace() workspaceId: string,
     @Query('platform') platform: Platform,
   ) {
     return this.analyticsService.getAnalyticsByPlatform(workspaceId, platform);

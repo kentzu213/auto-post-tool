@@ -1,12 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationType } from '@prisma/client';
+import { TenantScopeService } from '../auth/authorization/tenant-scope.service';
 
 @Injectable()
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenantScope: TenantScopeService,
+  ) {}
 
   /**
    * Tạo notification mới cho user
@@ -64,9 +68,21 @@ export class NotificationsService {
   }
 
   /**
-   * Đánh dấu đã đọc
+   * Đánh dấu đã đọc — chỉ trong phạm vi notification thuộc về principal user.
+   * Sử dụng resolve-or-404 nên một id không tồn tại hoặc thuộc user khác đều
+   * trả về 404 giống nhau (Req 4.4).
    */
-  async markAsRead(id: string) {
+  async markAsRead(userId: string, id: string) {
+    await this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.notification.findFirst({ where: { id, userId } }),
+      findUnscopedExists: () =>
+        this.prisma.notification.findUnique({ where: { id } }).then(Boolean),
+      workspaceId: userId,
+      resourceType: 'Notification',
+      resourceId: id,
+      userId,
+    });
     return this.prisma.notification.update({
       where: { id },
       data: { isRead: true },

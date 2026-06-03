@@ -1,0 +1,40 @@
+# Keep secrets and dev/build artifacts out of the Docker build context and image layers (Req 1.5).
+# Build context for apps/api, apps/web and apps/worker Dockerfiles is the monorepo root,
+# so this single root .dockerignore governs all three image builds.
+
+# --- Secrets: never copy any .env into an image layer (but keep the committed template) ---
+.env
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# --- Dependencies (reinstalled in the builder via pnpm install --frozen-lockfile) ---
+node_modules
+**/node_modules
+
+# --- VCS ---
+.git
+.gitignore
+
+# --- Build output / compiled artifacts (rebuilt inside the image) ---
+dist
+**/dist
+.next
+**/.next
+out
+**/out
+
+# --- Turborepo cache ---
+.turbo
+**/.turbo
+
+# --- Large Electron desktop build outputs (never part of api/web/worker images) ---
+apps/desktop/dist-win
+apps/desktop/dist
+*.blockmap
+
+# --- Logs and misc ---
+*.log
+coverage
+**/coverage

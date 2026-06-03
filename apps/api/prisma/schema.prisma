@@ -386,17 +386,23 @@ model QuotaAssignment {
 // ============================================================
 
 model AuditLog {
-  id        String   @id @default(uuid())
-  userId    String?
-  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  action    String // Ví dụ: 'login', 'create_post', 'delete_account'
-  details   String   @db.Text
-  ipAddress String?
-  userAgent String? // Browser/client identifier
-  createdAt DateTime @default(now())
+  id           String   @id @default(uuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action       String // Ví dụ: 'login', 'create_post', 'delete_account'
+  details      String   @db.Text
+  ipAddress    String?
+  userAgent    String? // Browser/client identifier
+  // --- workspace-authorization: nullable, additive structured denial fields (Req 11.1, 11.2) ---
+  workspaceId  String? // Active_Workspace at denial time
+  resourceType String? // target resource type (e.g. 'Post')
+  resourceId   String? // referenced id (cross-tenant 404 only)
+  outcome      String? // 'membership_denied' | 'role_denied' | 'cross_tenant_denied'
+  createdAt    DateTime @default(now())
 
   @@index([userId, action])
   @@index([createdAt])
+  @@index([workspaceId, outcome])
   @@map("audit_logs")
 }
 

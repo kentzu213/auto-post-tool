@@ -2,9 +2,15 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, main, develop]
+    tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [master, main]
+
+# Least-privilege default for every job (only read the repo). The build-and-publish
+# job widens this to `packages: write` so it can push to GHCR.
+permissions:
+  contents: read
 
 env:
   NODE_VERSION: '20'
@@ -123,3 +129,121 @@ jobs:
 
       - name: Audit Dependencies
         run: pnpm audit --audit-level=high || true
+
+  # ─── BUILD IMAGES → TRIVY SCAN → PUBLISH TO GHCR ────────────────────
+  # Runs ONLY after lint + test + build succeed (Req 9.1, 9.2): if any of those
+  # fail, this job never starts, so no image is ever built, scanned, or published.
+  #
+  # PR vs release gate (Req 9.x):
+  #   - On pull_request: build + Trivy scan run, but the push step is SKIPPED
+  #     (see the `if:` on "Build and push"), so PRs are scanned but never publish.
+  #   - On push to master or a v* tag: build + scan + push all run.
+  # The `is_release` step computes this once and the push step keys off it.
+  #
+  # Matrix builds the three images (api/web/worker) from the same source with the
+  # same steps to stay DRY; each entry only differs by Dockerfile path + image name.
+  build-and-publish:
+    name: Build, Scan & Publish (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    needs: [lint, test, build] # Req 9.1/9.2 — gate on build+test success
+    permissions:
+      contents: read
+      packages: write # required to push to GHCR with GITHUB_TOKEN
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: api
+            dockerfile: apps/api/Dockerfile
+            image: autopost-api
+          - app: web
+            dockerfile: apps/web/Dockerfile
+            image: autopost-web
+          - app: worker
+            dockerfile: apps/worker/Dockerfile
+            image: autopost-worker
+    steps:
+      - uses: actions/checkout@v4
+
+      # Derive whether this run should publish, and the semver tag.
+      # Semver rule (kept simple, Req 2.1):
+      #   - tag push  refs/tags/v1.2.3  -> semver = 1.2.3   (strip leading "v")
+      #   - branch push to master       -> semver = 0.0.0-dev (no release tag present)
+      #   - anything else (PRs)         -> not a release; push is skipped entirely
+      - name: Determine release + semver
+        id: meta
+        run: |
+          IS_RELEASE=false
+          SEMVER="0.0.0-dev"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            case "${{ github.ref }}" in
+              refs/tags/v*)
+                IS_RELEASE=true
+                SEMVER="${GITHUB_REF_NAME#v}"
+                ;;
+              refs/heads/master)
+                IS_RELEASE=true
+                SEMVER="0.0.0-dev"
+                ;;
+            esac
+          fi
+          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "semver=$SEMVER" >> "$GITHUB_OUTPUT"
+          echo "Resolved: is_release=$IS_RELEASE semver=$SEMVER (event=${{ github.event_name }}, ref=${{ github.ref }})"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the image locally (load into the runner's docker) so Trivy can scan
+      # the exact bits before anything is pushed. COMMIT_SHA/BUILD_ID are baked in
+      # for the /version endpoint (Req 1.6, 1.7). No secrets are passed as build args.
+      - name: Build image (local, for scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          push: false
+          tags: ${{ matrix.image }}:scan
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+            BUILD_ID=${{ github.run_id }}
+
+      # Fail the run on HIGH/CRITICAL findings BEFORE publishing (Req 9.3, 9.4).
+      # Pinned to a full commit SHA, not a mutable version tag: trivy-action's version
+      # tags were force-pushed to credential-stealing malware in the Mar-2026 supply-chain
+      # attack, so a SHA is the only safe pin. SHA below == tag v0.36.0 (verified via GitHub API).
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}:scan
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      # Only log in + push for releases (master / v* tag). Skipped on PRs (Req 9.x gate).
+      - name: Log in to GHCR
+        if: steps.meta.outputs.is_release == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Push the SAME content (rebuild from cache) tagged with BOTH sha-<commit>
+      # and the semver (Req 2.1). build-push-action reuses the buildx cache from the
+      # scan build, so the published bits match what Trivy scanned.
+      - name: Build and push to GHCR (release only)
+        if: steps.meta.outputs.is_release == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.meta.outputs.semver }}
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+            BUILD_ID=${{ github.run_id }}

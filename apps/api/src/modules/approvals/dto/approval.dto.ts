@@ -7,6 +7,9 @@ export class CreateApprovalDto {
   @IsNotEmpty()
   postId: string;
 
+  // IGNORED server-side: identity is derived from the verified auth context
+  // (@CurrentUser), never from client input (Req 2.4). Field kept to avoid
+  // breaking the client contract.
   @ApiProperty({ description: 'User ID người yêu cầu duyệt' })
   @IsString()
   @IsNotEmpty()
@@ -19,6 +22,9 @@ export class CreateApprovalDto {
 }
 
 export class ReviewApprovalDto {
+  // IGNORED server-side: identity is derived from the verified auth context
+  // (@CurrentUser), never from client input (Req 2.4). Field kept to avoid
+  // breaking the client contract.
   @ApiProperty({ description: 'User ID người duyệt' })
   @IsString()
   @IsNotEmpty()

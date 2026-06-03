@@ -3,6 +3,7 @@ import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { Public } from './decorators/public.decorator';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 
 @ApiTags('Authentication')
@@ -11,6 +12,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('register')
+  @Public()
   @ApiOperation({ summary: 'Đăng ký tài khoản người dùng mới' })
   @ApiResponse({ status: 201, description: 'Tạo tài khoản và workspace mặc định thành công' })
   @ApiResponse({ status: 409, description: 'Email đã tồn tại trên hệ thống' })
@@ -19,6 +21,7 @@ export class AuthController {
   }
 
   @Post('login')
+  @Public()
   @ApiOperation({ summary: 'Đăng nhập hệ thống' })
   @ApiResponse({ status: 200, description: 'Đăng nhập thành công và trả về JWT Access Token' })
   @ApiResponse({ status: 401, description: 'Email hoặc mật khẩu không chính xác' })
@@ -27,6 +30,7 @@ export class AuthController {
   }
 
   @Post('supabase-sync')
+  @Public()
   @ApiOperation({ summary: 'Đồng bộ tài khoản Supabase và phát hành Local JWT' })
   @ApiResponse({ status: 200, description: 'Đồng bộ và đăng nhập thành công' })
   async supabaseSync(

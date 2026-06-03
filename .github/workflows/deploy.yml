@@ -1,0 +1,294 @@
+# Deploy pipeline — promote ONE published artifact: staging → (approval) → production.
+#
+# Tasks 12.2 (staging) + 12.3 (production). This workflow NEVER builds or rebuilds an
+# image (Req 2.2/2.3): the images were built, Trivy-scanned, and pushed to GHCR by the
+# "CI/CD Pipeline" workflow (.github/workflows/ci.yml, task 12.1) tagged `sha-<commit>`
+# and `<semver>`. Here we only PULL `sha-<commit>` on the deploy hosts and run it.
+#
+# ── How the :sha tag flows into Compose ───────────────────────────────────────
+#   docker-compose.prod.yml has `build:` blocks for api/web/worker/migrate. On a deploy
+#   host we layer docker-compose.deploy.yml on top, which adds an `image:` pinned to
+#   `ghcr.io/${REGISTRY_OWNER}/autopost-{api,web,worker}:${IMAGE_TAG}`. With both files
+#   `docker compose pull` fetches the published artifact and `up -d --no-build` runs it.
+#   IMAGE_TAG + REGISTRY_OWNER are the SAME contract scripts/rollback.sh (task 11.3)
+#   uses, so deploy and rollback select the artifact identically.
+#
+# ── Trigger ───────────────────────────────────────────────────────────────────
+#   Chains off the CI/CD Pipeline via `workflow_run` so it only runs AFTER images are
+#   published. Restricted (see `resolve.if`) to successful PUSH-triggered CI runs
+#   (master/main/tags — the refs that publish), so PR CI runs never deploy.
+#   `workflow_dispatch` allows an operator to (re)promote a specific SHA manually.
+#   NOTE: `workflow_run` only fires when this file is on the repo default branch.
+#
+# ── Action pinning / supply chain ─────────────────────────────────────────────
+#   Only first-party actions are used (actions/checkout@v4, actions/setup-node@v4),
+#   matching ci.yml's convention. Host access uses a documented raw `ssh` step rather
+#   than a third-party SSH action — zero extra supply-chain surface (ci.yml SHA-pins
+#   the one third-party action it uses, Trivy, for the same reason). Secrets come only
+#   from GitHub secrets; production is further protected by the `production` Environment
+#   approval gate.
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ['CI/CD Pipeline']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Commit SHA to deploy (defaults to the SHA from the last CI run)'
+        required: false
+      semver:
+        description: 'Semantic version to record in the audit log (optional)'
+        required: false
+
+# Least privilege: the runner only needs to read the repo (it SSHes out to hosts and
+# the hosts pull from GHCR themselves). No `packages: write` / `deployments: write`.
+permissions:
+  contents: read
+
+# Never let two deploys of the same ref race each other onto the hosts.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ─── RESOLVE THE ARTIFACT IDENTITY (commit SHA → image tag, semver, owner) ───
+  resolve:
+    name: Resolve artifact identity
+    runs-on: ubuntu-latest
+    # Only deploy for a successful, push-triggered CI run (those are the runs that
+    # publish images), or a manual dispatch. PR CI runs are excluded.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    outputs:
+      commit_sha: ${{ steps.id.outputs.commit_sha }}
+      image_tag: ${{ steps.id.outputs.image_tag }}
+      semver: ${{ steps.id.outputs.semver }}
+      registry_owner: ${{ steps.id.outputs.registry_owner }}
+    steps:
+      - id: id
+        env:
+          OWNER: ${{ github.repository_owner }}
+          DISPATCH_SHA: ${{ github.event.inputs.commit_sha }}
+          DISPATCH_SEMVER: ${{ github.event.inputs.semver }}
+          WR_SHA: ${{ github.event.workflow_run.head_sha }}
+          WR_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          # Prefer an explicit dispatch SHA; otherwise the head SHA of the CI run.
+          SHA="${DISPATCH_SHA:-$WR_SHA}"
+          if [ -z "$SHA" ]; then
+            echo "::error::No commit SHA available to deploy." >&2
+            exit 1
+          fi
+          # GHCR repository paths must be lowercase.
+          OWNER_LC=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          # Semver: dispatch input wins; else derive like ci.yml (vX.Y.Z tag → X.Y.Z, else dev).
+          SEMVER="${DISPATCH_SEMVER:-}"
+          if [ -z "$SEMVER" ]; then
+            case "$WR_BRANCH" in
+              v*) SEMVER="${WR_BRANCH#v}" ;;
+              *)  SEMVER="0.0.0-dev" ;;
+            esac
+          fi
+          {
+            echo "commit_sha=$SHA"
+            echo "image_tag=sha-$SHA"
+            echo "semver=$SEMVER"
+            echo "registry_owner=$OWNER_LC"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved artifact: ghcr.io/$OWNER_LC/autopost-*:sha-$SHA (semver=$SEMVER)"
+
+  # ─── STAGING DEPLOY (Task 12.2 — Req 9.6 / 2.4 / 7.1) ───────────────────────
+  # Pull the :sha artifact, run the one-shot migrate BEFORE serving, recreate
+  # services, then smoke-test. A staging smoke failure fails the run here, so prod
+  # is never reached (Req 9.6: staging before prod within a Deployment_Run).
+  deploy-staging:
+    name: Deploy to staging + smoke
+    runs-on: ubuntu-latest
+    needs: resolve
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          # smoke.ts is TypeScript run directly via `node`; native type-stripping is
+          # on by default in Node >= 22.18, so we pin 22 (ci.yml's app build uses 20).
+          node-version: '22'
+
+      - name: Deploy to staging (pull → migrate → up) over SSH
+        env:
+          SSH_HOST: ${{ secrets.STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+          SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          DEPLOY_DIR: ${{ secrets.STAGING_DEPLOY_DIR || '/opt/autopost' }}
+          IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+          REGISTRY_OWNER: ${{ needs.resolve.outputs.registry_owner }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$SSH_USER@$SSH_HOST" \
+            DEPLOY_DIR="$DEPLOY_DIR" IMAGE_TAG="$IMAGE_TAG" REGISTRY_OWNER="$REGISTRY_OWNER" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          export IMAGE_TAG REGISTRY_OWNER
+          COMPOSE="docker compose -f docker-compose.prod.yml -f docker-compose.deploy.yml"
+          echo "Pulling artifact ${IMAGE_TAG}…"
+          $COMPOSE pull
+          echo "Applying migrations (prisma migrate deploy) BEFORE serving — Req 7.1…"
+          $COMPOSE run --rm migrate
+          echo "Recreating services from the pulled artifact (no rebuild)…"
+          $COMPOSE up -d --no-build
+          REMOTE
+
+      - name: Smoke test staging (gate before prod — Req 9.6 / 10.1)
+        env:
+          SMOKE_API_URL: ${{ secrets.STAGING_API_URL }}
+          SMOKE_WEB_URL: ${{ secrets.STAGING_WEB_URL }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          SMOKE_EMAIL: ${{ secrets.SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+        run: node scripts/smoke.ts
+
+  # ─── PRODUCTION DEPLOY (Task 12.3) ──────────────────────────────────────────
+  # Req 2.2/2.3: deploys the SAME `:sha` artifact verified in staging — no rebuild.
+  # Req 15.1 (LAUNCH GATE): `environment: production` requires manual approval. This
+  #   approval IS the Tenant_Isolation_Gate. The operator MUST only approve once the
+  #   `workspace-authorization` spec is implemented and verified (it is NOT implemented
+  #   in this spec). Configure required reviewers on the `production` Environment in
+  #   repo Settings → Environments; until approved, production is never touched.
+  # Req 7.1: one-shot migrate runs BEFORE services are recreated.
+  # Req 10.1: prod smoke test on the critical path.
+  # Req 10.2/10.3: on smoke failure, scripts/rollback.sh <prev_sha> restores the last
+  #   good artifact. prev_sha is read from the Deploy_Audit_Record (last result=success
+  #   line for production) — the same log written below, and the same source task 11.3's
+  #   rollback.sh consults.
+  # Req 9.5/12.6: a Deploy_Audit_Record JSON line is appended to the host audit log
+  #   /var/log/autopost/deploys.jsonl (queryable by an operator; read by rollback.sh).
+  deploy-production:
+    name: Deploy to production + smoke + audit
+    runs-on: ubuntu-latest
+    needs: [resolve, deploy-staging]
+    environment: production # ← manual-approval launch gate (Req 15.1)
+    env:
+      SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+      SSH_USER: ${{ secrets.PROD_SSH_USER }}
+      SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+      DEPLOY_DIR: ${{ secrets.PROD_DEPLOY_DIR || '/opt/autopost' }}
+      AUDIT_LOG: /var/log/autopost/deploys.jsonl
+      IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+      REGISTRY_OWNER: ${{ needs.resolve.outputs.registry_owner }}
+      COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      SEMVER: ${{ needs.resolve.outputs.semver }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Open SSH connection to prod
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy to production (pull → migrate → up) — Req 2.2/2.4/7.1
+        id: deploy_prod
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$SSH_USER@$SSH_HOST" \
+            DEPLOY_DIR="$DEPLOY_DIR" IMAGE_TAG="$IMAGE_TAG" REGISTRY_OWNER="$REGISTRY_OWNER" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          export IMAGE_TAG REGISTRY_OWNER
+          COMPOSE="docker compose -f docker-compose.prod.yml -f docker-compose.deploy.yml"
+          echo "Pulling artifact ${IMAGE_TAG}…"
+          $COMPOSE pull
+          echo "Applying migrations (prisma migrate deploy) BEFORE serving — Req 7.1…"
+          $COMPOSE run --rm migrate
+          echo "Recreating services from the pulled artifact (no rebuild)…"
+          $COMPOSE up -d --no-build
+          REMOTE
+
+      - name: Smoke test production (Req 10.1)
+        id: smoke_prod
+        env:
+          SMOKE_API_URL: ${{ secrets.PROD_API_URL }}
+          SMOKE_WEB_URL: ${{ secrets.PROD_WEB_URL }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          SMOKE_EMAIL: ${{ secrets.SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+        run: node scripts/smoke.ts
+
+      # Runs ONLY when the prod deploy succeeded but a LATER step (the smoke test)
+      # failed → Req 10.2/10.3. Resolves prev_sha from the audit log's last
+      # result=success production entry, then hands it to scripts/rollback.sh.
+      - name: Rollback on prod smoke failure (Req 10.2/10.3)
+        if: failure() && steps.deploy_prod.outcome == 'success'
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$SSH_USER@$SSH_HOST" \
+            DEPLOY_DIR="$DEPLOY_DIR" AUDIT_LOG="$AUDIT_LOG" REGISTRY_OWNER="$REGISTRY_OWNER" \
+            COMMIT_SHA="$COMMIT_SHA" SEMVER="$SEMVER" RUN_ID="$RUN_ID" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          # prev_sha = commitSha of the last successful PRODUCTION deploy recorded in the
+          # audit log (the previous good artifact). rollback.sh (task 11.3) consults the
+          # same record; we resolve it here to pass explicitly per `rollback.sh <prev_sha>`.
+          PREV_SHA=""
+          if [ -f "$AUDIT_LOG" ]; then
+            PREV_LINE=$(grep '"environment":"production"' "$AUDIT_LOG" 2>/dev/null \
+              | grep '"result":"success"' | tail -n 1 || true)
+            PREV_SHA=$(printf '%s' "$PREV_LINE" | sed -n 's/.*"commitSha":"\([^"]*\)".*/\1/p')
+          fi
+          if [ -z "$PREV_SHA" ]; then
+            echo "::error::No previous successful production deploy in $AUDIT_LOG — cannot auto-rollback. Follow docs/ROLLBACK.md manually." >&2
+            exit 1
+          fi
+          echo "Rolling back production to prev_sha=$PREV_SHA…"
+          bash scripts/rollback.sh "$PREV_SHA"
+          # Record the failed-and-rolled-back run. result="rolled_back" (NOT "success"),
+          # so the previous success entry stays the rollback target for the next run.
+          mkdir -p "$(dirname "$AUDIT_LOG")"
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          printf '{"deploymentRunId":"gh-run-%s","commitSha":"%s","semver":"%s","environment":"production","imageRefs":{"api":"ghcr.io/%s/autopost-api:sha-%s","web":"ghcr.io/%s/autopost-web:sha-%s","worker":"ghcr.io/%s/autopost-worker:sha-%s"},"result":"rolled_back","timestamp":"%s"}\n' \
+            "$RUN_ID" "$COMMIT_SHA" "$SEMVER" \
+            "$REGISTRY_OWNER" "$COMMIT_SHA" "$REGISTRY_OWNER" "$COMMIT_SHA" "$REGISTRY_OWNER" "$COMMIT_SHA" \
+            "$TS" >> "$AUDIT_LOG"
+          echo "Rollback complete; rolled_back record appended to $AUDIT_LOG."
+          REMOTE
+
+      # Success path: append the Deploy_Audit_Record with result="success" (Req 9.5/12.6).
+      # This is the entry rollback.sh / the next deploy reads as the last good prod SHA.
+      - name: Write Deploy_Audit_Record (Req 9.5/12.6)
+        if: success()
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$SSH_USER@$SSH_HOST" \
+            AUDIT_LOG="$AUDIT_LOG" REGISTRY_OWNER="$REGISTRY_OWNER" \
+            COMMIT_SHA="$COMMIT_SHA" SEMVER="$SEMVER" RUN_ID="$RUN_ID" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          mkdir -p "$(dirname "$AUDIT_LOG")"
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          printf '{"deploymentRunId":"gh-run-%s","commitSha":"%s","semver":"%s","environment":"production","imageRefs":{"api":"ghcr.io/%s/autopost-api:sha-%s","web":"ghcr.io/%s/autopost-web:sha-%s","worker":"ghcr.io/%s/autopost-worker:sha-%s"},"result":"success","timestamp":"%s"}\n' \
+            "$RUN_ID" "$COMMIT_SHA" "$SEMVER" \
+            "$REGISTRY_OWNER" "$COMMIT_SHA" "$REGISTRY_OWNER" "$COMMIT_SHA" "$REGISTRY_OWNER" "$COMMIT_SHA" \
+            "$TS" >> "$AUDIT_LOG"
+          echo "Deploy_Audit_Record (success) appended to $AUDIT_LOG."
+          REMOTE

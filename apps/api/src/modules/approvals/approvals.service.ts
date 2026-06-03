@@ -1,22 +1,36 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { TenantScopeService } from '../auth/authorization/tenant-scope.service';
 import { CreateApprovalDto, ReviewApprovalDto } from './dto/approval.dto';
 
 @Injectable()
 export class ApprovalsService {
   private readonly logger = new Logger(ApprovalsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenantScope: TenantScopeService,
+  ) {}
 
   /**
    * Gửi yêu cầu duyệt bài — cập nhật Post status → pending_approval
+   *
+   * Resolve the target Post through the Active_Workspace BEFORE creating anything:
+   * a cross-tenant (or absent) postId yields an indistinguishable 404 and NO
+   * ApprovalRequest is created (Req 7.1, 7.2). The requester identity is the
+   * server-derived userId, never the client-supplied dto.requestedBy (Req 2.4).
    */
-  async createRequest(dto: CreateApprovalDto) {
-    // Kiểm tra Post tồn tại
-    const post = await this.prisma.post.findUnique({ where: { id: dto.postId } });
-    if (!post) {
-      throw new NotFoundException(`Không tìm thấy post với ID: ${dto.postId}`);
-    }
+  async createRequest(workspaceId: string, userId: string, dto: CreateApprovalDto) {
+    await this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.post.findFirst({ where: { id: dto.postId, workspaceId } }),
+      findUnscopedExists: () =>
+        this.prisma.post.findUnique({ where: { id: dto.postId } }).then(Boolean),
+      workspaceId,
+      resourceType: 'Post',
+      resourceId: dto.postId,
+      userId,
+    });
 
     // Kiểm tra chưa có pending request
     const existingPending = await this.prisma.approvalRequest.findFirst({
@@ -31,7 +45,7 @@ export class ApprovalsService {
       this.prisma.approvalRequest.create({
         data: {
           postId: dto.postId,
-          requestedBy: dto.requestedBy,
+          requestedBy: userId,
           comment: dto.comment,
         },
       }),
@@ -47,16 +61,25 @@ export class ApprovalsService {
 
   /**
    * Duyệt hoặc từ chối bài viết
+   *
+   * Resolve the ApprovalRequest through its Post's Active_Workspace: a cross-tenant
+   * (or absent) approvalId yields an indistinguishable 404 (Req 5.1, 5.2). The
+   * reviewer identity is the server-derived userId, never dto.approvedBy (Req 2.4).
    */
-  async review(approvalId: string, dto: ReviewApprovalDto) {
-    const approval = await this.prisma.approvalRequest.findUnique({
-      where: { id: approvalId },
-      include: { post: true },
+  async review(workspaceId: string, userId: string, approvalId: string, dto: ReviewApprovalDto) {
+    const approval = await this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.approvalRequest.findFirst({
+          where: { id: approvalId, post: { workspaceId } },
+          include: { post: true },
+        }),
+      findUnscopedExists: () =>
+        this.prisma.approvalRequest.findUnique({ where: { id: approvalId } }).then(Boolean),
+      workspaceId,
+      resourceType: 'ApprovalRequest',
+      resourceId: approvalId,
+      userId,
     });
-
-    if (!approval) {
-      throw new NotFoundException(`Không tìm thấy yêu cầu duyệt: ${approvalId}`);
-    }
 
     if (approval.status !== 'pending') {
       throw new BadRequestException('Yêu cầu duyệt này đã được xử lý.');
@@ -69,7 +92,7 @@ export class ApprovalsService {
         where: { id: approvalId },
         data: {
           status: dto.decision,
-          approvedBy: dto.approvedBy,
+          approvedBy: userId,
           comment: dto.comment,
         },
       }),
@@ -79,12 +102,13 @@ export class ApprovalsService {
       }),
     ]);
 
-    this.logger.log(`✅ Bài ${approval.postId} đã được ${dto.decision} bởi ${dto.approvedBy}`);
+    this.logger.log(`✅ Bài ${approval.postId} đã được ${dto.decision} bởi ${userId}`);
     return updatedApproval;
   }
 
   /**
    * Lấy danh sách pending approvals (cho Approver dashboard)
+   * Chỉ trả về approvals thuộc Active_Workspace (Req 7.5).
    */
   async findPending(workspaceId: string) {
     return this.prisma.approvalRequest.findMany({
@@ -109,9 +133,20 @@ export class ApprovalsService {
   }
 
   /**
-   * Lấy lịch sử approval của 1 Post
+   * Lấy lịch sử approval của 1 Post — scoped theo Active_Workspace.
+   * Một postId thuộc tenant khác trả về 404 không phân biệt được với not-found.
    */
-  async findByPost(postId: string) {
+  async findByPost(workspaceId: string, postId: string) {
+    await this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.post.findFirst({ where: { id: postId, workspaceId } }),
+      findUnscopedExists: () =>
+        this.prisma.post.findUnique({ where: { id: postId } }).then(Boolean),
+      workspaceId,
+      resourceType: 'Post',
+      resourceId: postId,
+    });
+
     return this.prisma.approvalRequest.findMany({
       where: { postId },
       orderBy: { createdAt: 'desc' },

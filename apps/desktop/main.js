@@ -1,294 +1,148 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn, exec } = require('child_process');
-const net = require('net');
 
-let launcherWindow;
-let mainWindow;
-const activeProcesses = [];
-let checkInterval;
-let workerStarted = false;
+// ============================================================================
+// Izzi Auto Post — Thin hosted-URL shell (Req 14.3, 14.4)
+// ----------------------------------------------------------------------------
+// The backend (API / Web / Worker / Postgres / Redis / MinIO) is HOSTED.
+// This desktop app no longer spawns or port-probes any local service. It is a
+// thin shell that resolves a configurable hosted URL and loads it.
+// ============================================================================
 
-// Trạng thái các cổng dịch vụ mặc định
-const SERVICES = {
-  postgres: { name: 'PostgreSQL', port: 5432, type: 'database' },
-  redis: { name: 'Redis', port: 6379, type: 'database' },
-  minio: { name: 'MinIO Storage', port: 9000, type: 'database' },
-  api: { name: 'NestJS API', port: 3001, type: 'node' },
-  web: { name: 'Next.js Web', port: 3005, type: 'node' }
-};
+// TODO: REPLACE this placeholder with the real production web app URL before
+// shipping. It is only used as the last-resort fallback when no URL is provided
+// via the IZZI_SERVER_URL env var, the persisted config file, or the first-run
+// prompt.
+const DEFAULT_HOSTED_URL = 'https://app.example.com';
 
-const serviceStates = {
-  postgres: 'checking',
-  redis: 'checking',
-  minio: 'checking',
-  api: 'checking',
-  web: 'checking'
-};
+let mainWindow = null;
+let promptWindow = null;
 
-// Thông điệp lỗi chi tiết theo từng dịch vụ (hiển thị trên Launcher khi state = 'error')
-const serviceErrors = {};
-
-// Hàm kiểm tra trạng thái cổng (Pure Node.js)
-function checkPort(port) {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.once('error', (err) => {
-      if (err.code === 'EADDRINUSE') {
-        resolve(true); // Cổng đang bị chiếm (dịch vụ đang chạy)
-      } else {
-        resolve(false);
-      }
-    });
-    server.once('listening', () => {
-      server.close();
-      resolve(false); // Cổng trống (dịch vụ chưa chạy)
-    });
-    server.listen(port);
-  });
+// Persisted config lives in the per-user app data dir so it survives restarts
+// and is independent of the install location. Shape: { "serverUrl": "https://..." }
+function getConfigFile() {
+  return path.join(app.getPath('userData'), 'izzi-config.json');
 }
 
-// Gửi cập nhật trạng thái xuống Giao diện Launcher
-function broadcastStatus() {
-  if (launcherWindow && !launcherWindow.isDestroyed()) {
-    launcherWindow.webContents.send('service-status-update', serviceStates);
-    launcherWindow.webContents.send('service-error-update', serviceErrors);
-  }
-}
-
-// Đặt trạng thái lỗi kèm thông điệp rõ ràng cho một dịch vụ
-function setServiceError(serviceName, message) {
-  serviceStates[serviceName] = 'error';
-  serviceErrors[serviceName] = message;
-  console.error(`[${serviceName} Error]: ${message}`);
-  broadcastStatus();
-}
-
-// Quét kiểm tra tất cả các dịch vụ
-async function performServicesCheck() {
-  console.log('🔍 Checking services...');
-  
-  // 1. Kiểm tra cơ sở dữ liệu trước
-  const pgActive = await checkPort(SERVICES.postgres.port);
-  const redisActive = await checkPort(SERVICES.redis.port);
-  const minioActive = await checkPort(SERVICES.minio.port);
-
-  serviceStates.postgres = pgActive ? 'running' : 'offline';
-  serviceStates.redis = redisActive ? 'running' : 'offline';
-  serviceStates.minio = minioActive ? 'running' : 'offline';
-
-  // Nếu cơ sở dữ liệu chưa sẵn sàng thì dừng lại
-  if (!pgActive || !redisActive || !minioActive) {
-    serviceStates.api = 'checking';
-    serviceStates.web = 'checking';
-    broadcastStatus();
-    return;
-  }
-
-  // 2. Kiểm tra các dịch vụ Node.js
-  const apiActive = await checkPort(SERVICES.api.port);
-  const webActive = await checkPort(SERVICES.web.port);
-
-  // Cập nhật trạng thái API
-  if (apiActive) {
-    serviceStates.api = 'active';
-  } else if (serviceStates.api !== 'starting') {
-    // Nếu chưa khởi động và cổng trống -> Tiến hành khởi động
-    startNodeService('api');
-  }
-
-  // Cập nhật trạng thái Web
-  if (webActive) {
-    serviceStates.web = 'active';
-  } else if (serviceStates.web !== 'starting') {
-    // Nếu chưa khởi động và cổng trống -> Tiến hành khởi động
-    startNodeService('web');
-  }
-
-  // Khởi chạy Worker nếu chưa chạy
-  if (!workerStarted && (serviceStates.api === 'starting' || serviceStates.api === 'active')) {
-    workerStarted = true;
-    startNodeService('worker');
-  }
-
-  broadcastStatus();
-
-  // 3. Nếu toàn bộ dịch vụ đã active -> Chuyển hướng vào app chính!
-  if (serviceStates.api === 'active' && serviceStates.web === 'active') {
-    clearInterval(checkInterval);
-    setTimeout(launchMainWindow, 800);
-  }
-}
-
-// Đọc đường dẫn gốc monorepo được nhúng tại thời điểm build (app-config.json).
-// File này do generate-config.js sinh ra trước khi electron-builder đóng gói,
-// nên bản .exe đã cài vẫn biết repo nằm ở đâu trên máy dev.
-function readEmbeddedAppRoot() {
+function readPersistedUrl() {
   try {
-    const cfgPath = path.join(__dirname, 'app-config.json');
-    if (fs.existsSync(cfgPath)) {
-      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-      if (cfg && cfg.appRoot) return cfg.appRoot;
+    const file = getConfigFile();
+    if (fs.existsSync(file)) {
+      const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (cfg && typeof cfg.serverUrl === 'string' && cfg.serverUrl.trim()) {
+        return cfg.serverUrl.trim();
+      }
     }
   } catch (e) {
-    console.error('[config] Không đọc được app-config.json:', e.message);
+    console.error('[izzi-config] Không đọc được izzi-config.json:', e.message);
   }
   return null;
 }
 
-// Tìm thư mục gốc monorepo (chứa apps/api/dist) một cách đáng tin cậy.
-// Thứ tự ưu tiên các ứng viên:
-//   1) biến môi trường IZZI_APP_ROOT (người dùng tự cấu hình nếu repo ở vị trí khác)
-//   2) appRoot nhúng tại build-time (app-config.json) -> giúp .exe đã cài tìm lại repo
-//   3) __dirname/../.. (trường hợp chạy dev / unpackaged)
-// Trả về null nếu không tìm thấy -> để báo lỗi rõ ràng thay vì spawn nhầm.
-function resolveWorkspaceRoot() {
-  const candidates = [];
-  if (process.env.IZZI_APP_ROOT) {
-    candidates.push(process.env.IZZI_APP_ROOT);
+function persistUrl(url) {
+  try {
+    fs.writeFileSync(getConfigFile(), JSON.stringify({ serverUrl: url }, null, 2), 'utf8');
+  } catch (e) {
+    console.error('[izzi-config] Không ghi được izzi-config.json:', e.message);
   }
-  const embedded = readEmbeddedAppRoot();
-  if (embedded) {
-    candidates.push(embedded);
-  }
-  candidates.push(path.join(__dirname, '../..'));
-
-  for (const root of candidates) {
-    if (root && fs.existsSync(path.join(root, 'apps/api/dist/src/main.js'))) {
-      return root;
-    }
-  }
-  return null;
 }
 
-// Kiểm tra các artifact build cần thiết cho chế độ production của từng dịch vụ.
-// Trả về null nếu hợp lệ, hoặc một thông điệp lỗi rõ ràng (tiếng Việt) nếu thiếu.
-function checkProductionBuild(serviceName, workspaceRoot) {
-  if (serviceName === 'api') {
-    if (!fs.existsSync(path.join(workspaceRoot, 'apps/api/dist/src/main.js'))) {
-      return 'Thiếu bản build API (apps/api/dist/src/main.js). Hãy chạy: pnpm --filter @auto-post/api build';
-    }
-  } else if (serviceName === 'web') {
-    // next start YÊU CẦU bản build production (.next/BUILD_ID), không phải next dev
-    if (!fs.existsSync(path.join(workspaceRoot, 'apps/web/.next/BUILD_ID'))) {
-      return 'Thiếu bản build production của Web (apps/web/.next/BUILD_ID). Hãy chạy: pnpm --filter @auto-post/web build';
-    }
-  } else if (serviceName === 'worker') {
-    if (!fs.existsSync(path.join(workspaceRoot, 'apps/worker/dist/index.js'))) {
-      return 'Thiếu bản build Worker (apps/worker/dist/index.js). Hãy chạy: pnpm --filter @auto-post/worker build';
-    }
+// Accepts bare hosts ("app.example.com") and normalizes to a valid absolute URL.
+// Returns null for empty/invalid input.
+function normalizeUrl(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  let value = raw.trim();
+  if (!value) return null;
+  if (!/^https?:\/\//i.test(value)) {
+    value = 'https://' + value;
   }
-  return null;
+  try {
+    return new URL(value).toString();
+  } catch (e) {
+    return null;
+  }
 }
 
-// Khởi chạy các tiến trình Node.js ngầm
-function startNodeService(serviceName) {
-  serviceStates[serviceName] = 'starting';
-  broadcastStatus();
+// Resolve the base URL to load, in precedence order (Req 14.4):
+//   1) IZZI_SERVER_URL environment variable
+//   2) persisted config file (userData/izzi-config.json)
+//   3) first-run prompt (the entered URL is persisted for next launch)
+//   4) DEFAULT_HOSTED_URL placeholder constant
+async function resolveBaseUrl() {
+  const fromEnv = normalizeUrl(process.env.IZZI_SERVER_URL);
+  if (fromEnv) return fromEnv;
 
-  const isPackaged = app.isPackaged;
-  const workspaceRoot = resolveWorkspaceRoot();
+  const fromFile = normalizeUrl(readPersistedUrl());
+  if (fromFile) return fromFile;
 
-  let child;
+  const fromPrompt = await promptForUrl();
+  if (fromPrompt) {
+    persistUrl(fromPrompt); // skip the prompt on subsequent launches
+    return fromPrompt;
+  }
 
-  if (!isPackaged) {
-    // Chế độ phát triển (Development): Chạy lệnh qua pnpm workspace
-    const devRoot = workspaceRoot || path.join(__dirname, '../..');
-    const filter = serviceName === 'api' ? '@auto-post/api' : (serviceName === 'web' ? '@auto-post/web' : '@auto-post/worker');
-    console.log(`🚀 Starting ${serviceName} in dev mode via pnpm...`);
+  return DEFAULT_HOSTED_URL;
+}
 
-    child = spawn('pnpm', ['--filter', filter, 'dev'], {
-      shell: true,
-      cwd: devRoot
+// Show a simple input window asking for the hosted server URL.
+// Resolves with a normalized URL string, or null if cancelled/closed.
+function promptForUrl() {
+  return new Promise((resolve) => {
+    promptWindow = new BrowserWindow({
+      width: 560,
+      height: 380,
+      frame: false,
+      resizable: false,
+      backgroundColor: '#05070f',
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.join(__dirname, 'preload.js')
+      }
     });
-  } else {
-    // Chế độ sản phẩm (Production): Chạy trực tiếp các file build dist/.next
-    console.log(`🚀 Starting ${serviceName} in production mode...`);
-    if (!workspaceRoot) {
-      // Không tìm thấy mã nguồn đã build -> báo lỗi rõ ràng thay vì spawn nhầm đường dẫn
-      setServiceError(
-        serviceName,
-        'Không tìm thấy thư mục dự án (apps/api/dist). Hãy đặt biến môi trường IZZI_APP_ROOT trỏ tới thư mục monorepo trên máy, rồi mở lại ứng dụng.'
-      );
-      return;
-    }
-    // Kiểm tra artifact build production của riêng dịch vụ này
-    const buildError = checkProductionBuild(serviceName, workspaceRoot);
-    if (buildError) {
-      setServiceError(serviceName, buildError);
-      return;
-    }
-    if (serviceName === 'api') {
-      child = spawn('node', [path.join(workspaceRoot, 'apps/api/dist/src/main.js')], {
-        shell: true,
-        cwd: path.join(workspaceRoot, 'apps/api')
-      });
-    } else if (serviceName === 'web') {
-      // next start cần chạy với cwd = apps/web để tìm thư mục .next; next bin nằm trong node_modules của web
-      child = spawn('node', [path.join(workspaceRoot, 'apps/web/node_modules/next/dist/bin/next'), 'start', '-p', '3005'], {
-        shell: true,
-        cwd: path.join(workspaceRoot, 'apps/web')
-      });
-    } else if (serviceName === 'worker') {
-      child = spawn('node', [path.join(workspaceRoot, 'apps/worker/dist/index.js')], {
-        shell: true,
-        cwd: path.join(workspaceRoot, 'apps/worker')
-      });
-    }
+
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      ipcMain.removeHandler('izzi-prompt-default');
+      ipcMain.removeListener('izzi-prompt-submit', onSubmit);
+      ipcMain.removeListener('izzi-prompt-cancel', onCancel);
+      const win = promptWindow;
+      promptWindow = null;
+      if (win && !win.isDestroyed()) win.close();
+      resolve(value);
+    };
+
+    const onSubmit = (_event, raw) => finish(normalizeUrl(raw));
+    const onCancel = () => finish(null);
+
+    // Let the renderer prefill the input with the documented default.
+    ipcMain.handle('izzi-prompt-default', () => DEFAULT_HOSTED_URL);
+    ipcMain.on('izzi-prompt-submit', onSubmit);
+    ipcMain.on('izzi-prompt-cancel', onCancel);
+
+    promptWindow.loadFile(path.join(__dirname, 'launcher.html'));
+    promptWindow.once('ready-to-show', () => promptWindow.show());
+    // If the user closes the window without submitting, treat as cancel.
+    promptWindow.on('closed', () => finish(null));
+  });
+}
+
+// Re-prompt for a new URL, persist it, and reload the main window.
+// Wired to a menu item and to load-failure recovery.
+async function changeServerUrl() {
+  const url = await promptForUrl();
+  if (!url) return;
+  persistUrl(url);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.loadURL(url);
   }
-
-  child.stdout.on('data', (data) => {
-    console.log(`[${serviceName}]: ${data.toString().trim()}`);
-  });
-
-  child.stderr.on('data', (data) => {
-    console.error(`[${serviceName} Error]: ${data.toString().trim()}`);
-  });
-
-  child.on('close', (code) => {
-    console.log(`[${serviceName}] exited with code ${code}`);
-    if (serviceStates[serviceName] !== 'active') {
-      setServiceError(
-        serviceName,
-        `Tiến trình ${serviceName} thoát với mã ${code}. Kiểm tra log/cổng (API:3001, Web:3005) hoặc file .env tương ứng.`
-      );
-    }
-  });
-
-  activeProcesses.push(child);
 }
 
-// Tạo cửa sổ Splash Screen
-function createLauncherWindow() {
-  launcherWindow = new BrowserWindow({
-    width: 600,
-    height: 480,
-    frame: false,
-    resizable: false,
-    backgroundColor: '#05070f',
-    show: false,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
-    }
-  });
-
-  launcherWindow.loadFile(path.join(__dirname, 'launcher.html'));
-
-  launcherWindow.once('ready-to-show', () => {
-    launcherWindow.show();
-    // Bắt đầu vòng lặp kiểm tra
-    performServicesCheck();
-    checkInterval = setInterval(performServicesCheck, 2000);
-  });
-}
-
-// Tạo cửa sổ Dashboard Chính (khi các server đã sẵn sàng)
-function launchMainWindow() {
-  if (mainWindow) return;
-
+function createMainWindow(base) {
   mainWindow = new BrowserWindow({
     width: 1366,
     height: 850,
@@ -297,79 +151,93 @@ function launchMainWindow() {
     title: 'Izzi Auto Post',
     backgroundColor: '#05070f',
     show: false,
-    frame: false,
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#05070f',
-      symbolColor: '#94a3b8',
-      height: 40
-    },
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      contextIsolation: true
     }
   });
 
-  mainWindow.setMenuBarVisibility(false);
-  mainWindow.loadURL('http://localhost:3005');
+  mainWindow.loadURL(base);
 
   mainWindow.once('ready-to-show', () => {
-    // Ẩn launcher và hiện cửa sổ chính với hiệu ứng mượt mà
     mainWindow.show();
-    if (launcherWindow) {
-      launcherWindow.close();
-      launcherWindow = null;
-    }
   });
+
+  // If the hosted URL fails to load, offer to change it or retry.
+  mainWindow.webContents.on(
+    'did-fail-load',
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return; // ignore sub-resource failures
+      if (errorCode === -3) return; // ERR_ABORTED (e.g. redirect) — not a real failure
+      dialog
+        .showMessageBox(mainWindow, {
+          type: 'error',
+          title: 'Không tải được máy chủ',
+          message: `Không thể kết nối tới: ${validatedURL || base}`,
+          detail: `${errorDescription} (mã ${errorCode}). Bạn có thể đổi URL máy chủ hoặc thử lại.`,
+          buttons: ['Đổi URL máy chủ', 'Thử lại', 'Đóng'],
+          defaultId: 0,
+          cancelId: 2
+        })
+        .then((result) => {
+          if (result.response === 0) {
+            changeServerUrl();
+          } else if (result.response === 1 && mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.reload();
+          }
+        });
+    }
+  );
 
   mainWindow.on('closed', () => {
     mainWindow = null;
-    app.quit();
   });
 }
 
-// Giải phóng toàn bộ tiến trình con (Tránh lỗi chiếm dụng cổng zombie)
-function cleanupProcesses() {
-  console.log('🧹 Cleaning up background processes...');
-  clearInterval(checkInterval);
-  
-  activeProcesses.forEach((child) => {
-    if (child && child.pid) {
-      console.log(`Killing process tree for PID: ${child.pid}`);
-      if (process.platform === 'win32') {
-        exec(`taskkill /pid ${child.pid} /T /F`, (err) => {
-          if (err) console.error(`Failed to kill process tree for ${child.pid}:`, err);
-        });
-      } else {
-        process.kill(-child.pid, 'SIGKILL'); // Unix process group kill
-      }
+function buildAppMenu() {
+  const template = [
+    {
+      label: 'Tệp',
+      submenu: [
+        { label: 'Đổi URL máy chủ…', click: () => changeServerUrl() },
+        { type: 'separator' },
+        { role: 'quit', label: 'Thoát' }
+      ]
+    },
+    {
+      label: 'Xem',
+      submenu: [
+        { role: 'reload', label: 'Tải lại' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' }
+      ]
     }
-  });
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-// Đăng ký các cổng giao tiếp IPC
-ipcMain.on('retry-services-check', () => {
-  console.log('🔄 User triggered manual retry check...');
-  performServicesCheck();
-});
-
-// Vòng đời ứng dụng Electron
-app.on('ready', createLauncherWindow);
-
-app.on('will-quit', () => {
-  cleanupProcesses();
+// Electron lifecycle
+app.whenReady().then(async () => {
+  buildAppMenu();
+  const base = await resolveBaseUrl();
+  createMainWindow(base);
 });
 
 app.on('window-all-closed', () => {
-  cleanupProcesses();
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
 
-app.on('activate', () => {
-  if (launcherWindow === null && mainWindow === null) {
-    createLauncherWindow();
+app.on('activate', async () => {
+  if (mainWindow === null && promptWindow === null) {
+    const base = await resolveBaseUrl();
+    createMainWindow(base);
   }
 });

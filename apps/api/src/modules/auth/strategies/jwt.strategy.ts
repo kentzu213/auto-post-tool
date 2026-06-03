@@ -13,7 +13,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: { sub: string; email: string }) {
+  async validate(payload: { sub: string; email: string; workspaceId?: string | null }) {
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
       select: {
@@ -27,6 +27,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException('Người dùng không tồn tại hoặc token không hợp lệ');
     }
 
-    return user;
+    return { ...user, tokenWorkspaceId: payload.workspaceId ?? null };
   }
 }

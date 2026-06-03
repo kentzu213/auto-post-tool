@@ -1,12 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { TenantScopeService } from '../auth/authorization/tenant-scope.service';
 import { Platform } from '@prisma/client';
 
 @Injectable()
 export class AnalyticsService {
   private readonly logger = new Logger(AnalyticsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenantScope: TenantScopeService,
+  ) {}
 
   /**
    * Lấy tổng quan analytics cho workspace dashboard
@@ -148,7 +152,25 @@ export class AnalyticsService {
   /**
    * Lấy analytics chi tiết cho 1 schedule/bài đăng cụ thể
    */
-  async getPostAnalytics(scheduleId: string) {
+  async getPostAnalytics(workspaceId: string, scheduleId: string) {
+    // Resolve the by-id reference through the active workspace BEFORE any read: a
+    // schedule reaches its workspace transitively via post.workspaceId. A cross-tenant
+    // or genuinely absent scheduleId returns an indistinguishable 404 (Req 5.1).
+    await this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.schedule.findFirst({
+          where: { id: scheduleId, post: { workspaceId } },
+          select: { id: true },
+        }),
+      findUnscopedExists: () =>
+        this.prisma.schedule
+          .findUnique({ where: { id: scheduleId }, select: { id: true } })
+          .then(Boolean),
+      workspaceId,
+      resourceType: 'Schedule',
+      resourceId: scheduleId,
+    });
+
     const analytics = await this.prisma.analytics.findUnique({
       where: { scheduleId },
       include: {

@@ -9,9 +9,10 @@ import { TikTokProvider } from './providers/tiktok.provider';
 import { ProviderManager } from './providers/provider-manager';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { CryptoModule } from '../../common/services/crypto.module';
+import { AuthorizationModule } from '../auth/authorization/authorization.module';
 
 @Module({
-  imports: [PrismaModule, CryptoModule],
+  imports: [PrismaModule, CryptoModule, AuthorizationModule],
   controllers: [SocialAuthController, CredentialsController],
   providers: [
     SocialAuthService,

@@ -1,12 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { TenantScopeService } from '../auth/authorization/tenant-scope.service';
 import { Platform } from '@prisma/client';
 
 @Injectable()
 export class InboxService {
   private readonly logger = new Logger(InboxService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenantScope: TenantScopeService,
+  ) {}
 
   /**
    * Lấy tất cả tin nhắn đến từ tất cả tài khoản MXH (Unified Inbox)
@@ -59,9 +63,25 @@ export class InboxService {
   }
 
   /**
-   * Đánh dấu tin nhắn đã đọc
+   * Đánh dấu tin nhắn đã đọc — chỉ trong workspace đang hoạt động.
+   * Resolve-or-404 transitively via socialAccount.workspaceId: tin nhắn cross-tenant
+   * trả 404 giống hệt khi không tồn tại, và không bị mutate (Req 5.1, 5.2).
    */
-  async markAsRead(messageId: string) {
+  async markAsRead(workspaceId: string, messageId: string) {
+    await this.tenantScope.requireOwned({
+      findScoped: () =>
+        this.prisma.inboxMessage.findFirst({
+          where: { id: messageId, socialAccount: { workspaceId } },
+        }),
+      findUnscopedExists: () =>
+        this.prisma.inboxMessage
+          .findUnique({ where: { id: messageId } })
+          .then(Boolean),
+      workspaceId,
+      resourceType: 'InboxMessage',
+      resourceId: messageId,
+    });
+
     return this.prisma.inboxMessage.update({
       where: { id: messageId },
       data: { isRead: true },

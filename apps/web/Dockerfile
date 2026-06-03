@@ -1,10 +1,17 @@
+# syntax=docker/dockerfile:1
+
+# Pinned Node 20 base image (immutable): version tag for readability + @sha256 digest for
+# reproducibility (Req 1.3 - never floating :latest / :20). Digest resolved from Docker Hub
+# library/node:20.18.1-alpine3.21 (multi-arch manifest list). Bump deliberately in CI, never float.
+ARG NODE_IMAGE=node:20.18.1-alpine3.21@sha256:24fb6aa7020d9a20b00d6da6d1714187c45ed00d1eb4adb01395843c338b9372
+
 # --- Stage 1: Build ---
-FROM node:18-alpine AS builder
+FROM ${NODE_IMAGE} AS builder
 
 WORKDIR /app
 
-# Cài đặt pnpm toàn cục
-RUN npm install -g pnpm
+# Cài đặt pnpm toàn cục (pinned to repo packageManager for reproducible builds - Req 1.6)
+RUN npm install -g pnpm@9.1.0
 
 # Copy files cấu hình Monorepo
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json tsconfig.json ./
@@ -19,23 +26,46 @@ RUN pnpm install --frozen-lockfile
 # Copy toàn bộ mã nguồn
 COPY . .
 
+# Next.js inlines NEXT_PUBLIC_* at BUILD time, so the browser-facing API base URL
+# must be provided as a build arg for a hosted deploy (else it falls back to
+# http://localhost:3001 and the shipped app cannot reach the API). Passed by CI /
+# the VPS bootstrap as --build-arg NEXT_PUBLIC_API_URL=https://api.<host>.
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
 # Build dự án NextJS qua Turborepo
 RUN pnpm --filter @auto-post/web build
 
 # --- Stage 2: Runner ---
-FROM node:18-alpine AS runner
+FROM ${NODE_IMAGE} AS runner
 
 WORKDIR /app
 
 ENV NODE_ENV=production
 
-# Copy built files và dependencies
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/apps/web/.next ./apps/web/.next
-COPY --from=builder /app/apps/web/public ./apps/web/public
-COPY --from=builder /app/apps/web/package.json ./apps/web/package.json
-COPY --from=builder /app/packages ./packages
+# Build metadata injected by CI (non-secret build args, Req 1.7).
+ARG COMMIT_SHA
+ARG BUILD_ID
+ENV APP_COMMIT_SHA=$COMMIT_SHA
+ENV APP_BUILD_ID=$BUILD_ID
+
+# curl is required by the container HEALTHCHECK below (Req 1.8)
+RUN apk add --no-cache curl
+
+# Copy only the Next.js build output, public assets, deps and manifest, owned by 'node' (Req 1.4).
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/apps/web/.next ./apps/web/.next
+COPY --from=builder --chown=node:node /app/apps/web/public ./apps/web/public
+COPY --from=builder --chown=node:node /app/apps/web/package.json ./apps/web/package.json
+COPY --from=builder --chown=node:node /app/packages ./packages
+
+# Run as the non-root 'node' user shipped by the official base image (uid 1000) (Req 1.4)
+USER node
 
 EXPOSE 3000
+
+# Container healthcheck hits the web server root (Next.js has no dedicated health route) (Req 1.8).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD curl -fsS http://localhost:3000/ || exit 1
 
 CMD ["node_modules/.bin/next", "start", "apps/web", "-p", "3000"]

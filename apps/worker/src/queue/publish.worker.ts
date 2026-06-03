@@ -13,6 +13,13 @@ import {
   ExponentialBackoff, 
   ConsecutiveBreaker 
 } from 'cockatiel';
+import { logJobOutcome } from '../observability/logger';
+import { sendAlert } from '../observability/alert';
+import { captureException } from '../observability/sentry';
+import { recordPublishJobFailure } from '../observability/metrics';
+import { resolveOwningWorkspace } from './resolve-workspace';
+
+const QUEUE_NAME = 'publishing-queue';
 
 const prisma = new PrismaClient();
 const logger = {
@@ -226,6 +233,80 @@ export function startPublishWorker() {
       const { scheduleId } = job.data;
       logger.log(`📥 Đang xử lý Job ID ${job.id} cho Schedule ${scheduleId}...`);
 
+      // TENANT ISOLATION GATE (Req 10.2, 10.3, 10.4): resolve the owning workspace from the
+      // schedule's stored foreign keys BEFORE reading/mutating any resource for publishing.
+      // Any workspace hint in job.data is ignored — the resolver derives tenancy purely from
+      // post.workspaceId + socialAccount.workspaceId.
+      const resolution = await resolveOwningWorkspace(prisma, scheduleId);
+      if (!resolution.ok) {
+        const reason = resolution.reason; // 'unresolvable' | 'cross_workspace_mismatch'
+        const haltMessage = `Worker tenant isolation halt: ${reason} for schedule ${scheduleId}`;
+        logger.error(`🛑 ${haltMessage}`);
+
+        // Mutate NOTHING for publishing. Mark the schedule + its post failed and write a
+        // failure AuditLog (reason only — never tokens/secrets), reusing the dead-letter audit
+        // style. All wrapped in try/catch so a missing schedule/post never crashes the halt.
+        try {
+          const failed = await prisma.schedule.findUnique({
+            where: { id: scheduleId },
+            include: {
+              post: { select: { id: true } },
+              socialAccount: { select: { workspaceId: true } },
+            },
+          });
+
+          if (failed) {
+            await prisma.schedule.update({
+              where: { id: scheduleId },
+              data: { status: 'failed', errorLog: haltMessage },
+            });
+
+            if (failed.post?.id) {
+              await prisma.post.update({
+                where: { id: failed.post.id },
+                data: { status: 'failed' },
+              });
+            }
+
+            let ownerId: string | null = null;
+            if (failed.socialAccount?.workspaceId) {
+              const workspace = await prisma.workspace.findUnique({
+                where: { id: failed.socialAccount.workspaceId },
+                select: { ownerId: true },
+              });
+              ownerId = workspace?.ownerId ?? null;
+            }
+
+            await prisma.auditLog.create({
+              data: {
+                userId: ownerId,
+                action: 'publish_post_tenant_isolation_halt',
+                details: `Job ${job.id} cho Schedule ${scheduleId} bị chặn do cô lập tenant (reason: ${reason}). Không đọc/ghi tài nguyên đăng bài.`,
+                outcome: reason,
+              },
+            });
+          } else {
+            // Missing schedule — still record a failure AuditLog identifying the job + reason.
+            await prisma.auditLog.create({
+              data: {
+                userId: null,
+                action: 'publish_post_tenant_isolation_halt',
+                details: `Job ${job.id} cho Schedule ${scheduleId} bị chặn do cô lập tenant (reason: ${reason}). Schedule không tồn tại.`,
+                outcome: reason,
+              },
+            });
+          }
+        } catch (haltErr: any) {
+          logger.error(
+            `⚠️ Không thể ghi nhận sự kiện tenant-isolation halt cho job ${job.id} (vẫn throw để BullMQ đánh dấu thất bại): ${haltErr.message}`,
+          );
+        }
+
+        // Throw so BullMQ marks the job failed and reuses the existing retry/dead-letter
+        // handling + worker.on('failed') observability already in this file.
+        throw new Error(haltMessage);
+      }
+
       const schedule = await prisma.schedule.findUnique({
         where: { id: scheduleId },
         include: {
@@ -373,12 +454,119 @@ export function startPublishWorker() {
     }
   );
 
-  worker.on('failed', (job, err) => {
-    logger.error(`❌ Job ${job?.id} thất bại hoàn toàn sau các lượt thử lại: ${err.message}`);
+  // Phân biệt một lần thử THẤT BẠI TẠM THỜI (sẽ được BullMQ thử lại theo backoff) với
+  // THẤT BẠI CUỐI CÙNG (đã hết số lần thử cấu hình → điều kiện Dead-Letter).
+  // BullMQ phơi bày điều này qua job.attemptsMade so với job.opts.attempts.
+  worker.on('failed', async (job, err) => {
+    if (!job) {
+      logger.error(`❌ Một job thất bại nhưng không có thông tin job: ${err?.message}`);
+      return;
+    }
+
+    const maxAttempts = job.opts.attempts ?? 1;
+    const attemptsMade = job.attemptsMade ?? 0;
+    const isFinalFailure = attemptsMade >= maxAttempts;
+
+    if (!isFinalFailure) {
+      // Thất bại tạm thời — BullMQ sẽ tự động thử lại theo cấu hình backoff.
+      logger.warn(
+        `⚠️ Job ${job.id} thất bại ở lần thử ${attemptsMade}/${maxAttempts}: ${err.message}. Sẽ thử lại theo backoff.`,
+      );
+      logJobOutcome({
+        jobId: job.id,
+        queue: QUEUE_NAME,
+        outcome: 'retrying',
+        scheduleId: job.data?.scheduleId,
+        attemptsMade,
+        maxAttempts,
+        reason: err.message,
+      });
+      return;
+    }
+
+    // THẤT BẠI CUỐI CÙNG — đã hết số lần thử lại → đưa job vào Dead_Letter_Store.
+    // Vì removeOnFail=false (cấu hình ở scheduler.service.ts) job thất bại được GIỮ LẠI trong
+    // Redis (failed set) để giám sát — đây chính là Dead_Letter_Store.
+    const scheduleId = job.data?.scheduleId;
+    logger.error(
+      `❌ [DEAD-LETTER] Job ${job.id} (Schedule ${scheduleId}) thất bại hoàn toàn sau ${attemptsMade}/${maxAttempts} lần thử. Lý do: ${err.message}`,
+    );
+
+    // Observability for the dead-letter event (all sinks no-op when unconfigured):
+    //  - structured JSON outcome log (Req 12.1)
+    //  - Publish_Job failure metric (Req 12.3)
+    //  - Sentry capture of the final failure (Req 12.2)
+    //  - Alert that a job was moved to the Dead_Letter_Store (Req 12.5)
+    logJobOutcome({
+      jobId: job.id,
+      queue: QUEUE_NAME,
+      outcome: 'dead_letter',
+      scheduleId,
+      attemptsMade,
+      maxAttempts,
+      reason: err.message,
+    });
+    recordPublishJobFailure({ platform: job.data?.platform });
+    captureException(err);
+    void sendAlert({
+      type: 'dead_letter',
+      message: `Publish_Job ${job.id} moved to Dead_Letter_Store after ${attemptsMade}/${maxAttempts} attempts: ${err.message}`,
+      jobId: job.id,
+      queue: QUEUE_NAME,
+      scheduleId,
+      attemptsMade,
+      maxAttempts,
+    });
+
+    // Ghi nhận sự kiện dead-letter một cách BỀN VỮNG & KHÔNG CHẶN: toàn bộ được bọc trong
+    // try/catch để không bao giờ throw ra khỏi event handler. KHÔNG ghi token/secret.
+    try {
+      if (scheduleId) {
+        const schedule = await prisma.schedule.findUnique({
+          where: { id: scheduleId },
+          include: { socialAccount: true },
+        });
+
+        if (schedule) {
+          // Đảm bảo lý do thất bại cuối cùng được lưu vào errorLog (processor thường đã set,
+          // nhưng đảm bảo cả khi lỗi xảy ra ngoài khối catch của processor).
+          await prisma.schedule.update({
+            where: { id: scheduleId },
+            data: { status: 'failed', errorLog: err.message },
+          });
+
+          // Bản ghi dead-letter riêng biệt trong AuditLog (không chứa token/secret).
+          const workspace = await prisma.workspace.findUnique({
+            where: { id: schedule.socialAccount.workspaceId },
+            select: { ownerId: true },
+          });
+          await prisma.auditLog.create({
+            data: {
+              userId: workspace?.ownerId ?? null,
+              action: 'publish_post_dead_letter',
+              details: `Job ${job.id} cho Schedule ${scheduleId} (${schedule.platform.toUpperCase()}) đã chuyển vào Dead_Letter_Store sau ${attemptsMade}/${maxAttempts} lần thử. Lý do: ${err.message}`,
+            },
+          });
+        }
+      }
+    } catch (deadLetterErr: any) {
+      logger.error(
+        `⚠️ Không thể ghi nhận sự kiện dead-letter cho job ${job?.id} (không ảnh hưởng luồng worker): ${deadLetterErr.message}`,
+      );
+    }
   });
 
   worker.on('completed', (job) => {
     logger.log(`✓ Job ${job.id} hoàn thành thành công.`);
+    // Structured JSON job-outcome log (Req 12.1): jobId/queue/outcome/durationMs.
+    logJobOutcome({
+      jobId: job.id,
+      queue: QUEUE_NAME,
+      outcome: 'completed',
+      durationMs:
+        job.finishedOn && job.processedOn ? job.finishedOn - job.processedOn : undefined,
+      scheduleId: job.data?.scheduleId,
+    });
   });
 }
 

@@ -1,0 +1,35 @@
+# docker-compose.deploy.yml — deploy-time image override (tasks 12.2 / 12.3)
+#
+# Layered ON TOP of docker-compose.prod.yml on the deploy host:
+#   docker compose -f docker-compose.prod.yml -f docker-compose.deploy.yml <cmd>
+#
+# Purpose (Req 2.2 / 2.3 / 2.4): the production stack normally `build:`s each app
+# from source. On a deploy host we must instead PULL the exact artifact that CI
+# built, scanned (Trivy), and published to GHCR — never rebuild. This override
+# adds an `image:` to each app service pinned to an immutable tag, so
+# `docker compose pull` fetches that published image and `up -d --no-build`
+# runs it without touching the local `build:` definition.
+#
+# Two variables select the artifact. They are exported by .github/workflows/deploy.yml
+# AND by scripts/rollback.sh (task 11.3) — KEEP THESE NAMES STABLE so deploy and
+# rollback consume the tag the same way:
+#   IMAGE_TAG        immutable image tag — deploy passes `sha-<commitSHA>`,
+#                    rollback passes `sha-<previousSuccessfulSHA>`
+#   REGISTRY_OWNER   GHCR namespace / owner (e.g. your-org or your-github-user)
+#
+# Image names match task 12.1 exactly: ghcr.io/<owner>/autopost-{api,web,worker}.
+# `migrate` reuses the api image so the one-shot `prisma migrate deploy` runs the
+# same code as the deployed api (Req 7.1).
+
+services:
+  migrate:
+    image: ghcr.io/${REGISTRY_OWNER:?set REGISTRY_OWNER}/autopost-api:${IMAGE_TAG:?set IMAGE_TAG}
+
+  api:
+    image: ghcr.io/${REGISTRY_OWNER}/autopost-api:${IMAGE_TAG}
+
+  worker:
+    image: ghcr.io/${REGISTRY_OWNER}/autopost-worker:${IMAGE_TAG}
+
+  web:
+    image: ghcr.io/${REGISTRY_OWNER}/autopost-web:${IMAGE_TAG}

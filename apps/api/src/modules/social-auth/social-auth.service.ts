@@ -5,6 +5,8 @@ import { Platform, AccountStatus } from '@prisma/client';
 import { ProviderManager } from './providers/provider-manager';
 import { TikTokProvider } from './providers/tiktok.provider';
 import { CredentialsService } from './credentials.service';
+import { TenantScopeService } from '../auth/authorization/tenant-scope.service';
+import { signOAuthState, verifyOAuthState } from './oauth-state';
 
 @Injectable()
 export class SocialAuthService {
@@ -12,7 +14,7 @@ export class SocialAuthService {
 
   /**
    * In-memory storage cho PKCE code_verifier.
-   * Key = state (workspaceId), Value = { codeVerifier, createdAt }
+   * Key = signed OAuth `state` (ổn định giữa redirect/callback), Value = { codeVerifier, createdAt }
    * Entries tự động cleanup sau 10 phút.
    */
   private readonly pkceStore = new Map<string, { codeVerifier: string; createdAt: number }>();
@@ -23,19 +25,15 @@ export class SocialAuthService {
     private readonly crypto: CryptoService,
     private readonly providerManager: ProviderManager,
     private readonly credentialsService: CredentialsService,
+    private readonly tenantScope: TenantScopeService,
   ) {}
 
   /**
    * Lấy danh sách các tài khoản MXH đã liên kết
    */
   async getAccounts(workspaceId: string): Promise<any[]> {
-    const workspace = await this.prisma.workspace.findUnique({
-      where: { id: workspaceId },
-    });
-    const whereClause = workspace ? { workspaceId } : {};
-
     return this.prisma.socialAccount.findMany({
-      where: whereClause,
+      where: { workspaceId },
       orderBy: { createdAt: 'desc' },
       select: {
         id: true,
@@ -55,6 +53,11 @@ export class SocialAuthService {
   async getAuthRedirectUrl(platform: Platform, workspaceId: string): Promise<string> {
     // Cleanup expired PKCE entries
     this.cleanupExpiredPKCE();
+
+    // Build a SIGNED OAuth `state` encoding the active workspace (Req 8.2).
+    // The callback verifies this signature instead of trusting a raw value,
+    // so a caller cannot forge the workspace association.
+    const state = signOAuthState(workspaceId);
 
     // Try to get real credentials
     const credentials = await this.credentialsService.getCredentials(workspaceId, platform);
@@ -84,30 +87,42 @@ export class SocialAuthService {
 
       // TikTok cần PKCE — tạo code_verifier và lưu vào memory
       if (platform === Platform.tiktok && provider instanceof TikTokProvider) {
-        const { url, codeVerifier } = provider.generateAuthUrlWithPKCE(credentials, workspaceId);
-        
-        // Lưu code_verifier theo state (= workspaceId) để dùng khi callback
-        this.pkceStore.set(workspaceId, { codeVerifier, createdAt: Date.now() });
-        this.logger.log(`🔗 [TikTok] Auth URL generated with PKCE. code_verifier stored for state=${workspaceId}`);
-        
+        const { url, codeVerifier } = provider.generateAuthUrlWithPKCE(credentials, state);
+
+        // Lưu code_verifier theo signed state để dùng khi callback
+        this.pkceStore.set(state, { codeVerifier, createdAt: Date.now() });
+        this.logger.log(`🔗 [TikTok] Auth URL generated with PKCE. code_verifier stored for signed state`);
+
         return url;
       }
 
       // Các platform khác (Facebook, YouTube) — không cần PKCE
-      const url = provider.generateAuthUrl(credentials, workspaceId);
+      const url = provider.generateAuthUrl(credentials, state);
       this.logger.log(`🔗 [${platform}] Real OAuth URL generated → redirect tới ${platform}.com`);
       return url;
     }
 
     // ⚠️ MOCK FALLBACK cho các nền tảng khác nếu chưa cấu hình
     this.logger.warn(`⚠️ [${platform}] Chưa cấu hình API credentials. Sử dụng Mock OAuth.`);
-    return `http://localhost:3005/auth/mock-oauth?platform=${platform}&state=${workspaceId}`;
+    return `http://localhost:3005/auth/mock-oauth?platform=${platform}&state=${encodeURIComponent(state)}`;
   }
 
   /**
    * Xử lý OAuth callback — sử dụng Provider thật hoặc Mock
+   *
+   * Workspace KHÔNG còn được tin tưởng từ một giá trị thô. Nó được suy ra bằng cách
+   * VERIFY chữ ký của signed `state` đã phát hành lúc connect (Req 8.2). Nếu state
+   * thiếu/sai chữ ký/giả mạo → callback thất bại, không tạo tài khoản nào.
    */
-  async handleOAuthCallback(platform: Platform, code: string, workspaceId: string): Promise<any[]> {
+  async handleOAuthCallback(platform: Platform, code: string, state: string): Promise<any[]> {
+    // Verify signed state → derive the trusted workspace (Req 8.2).
+    const verified = verifyOAuthState(state);
+    if (!verified) {
+      this.logger.error(`❌ OAuth callback bị từ chối: signed state không hợp lệ hoặc thiếu.`);
+      throw new BadRequestException('Phiên kết nối không hợp lệ (state). Vui lòng thử kết nối lại.');
+    }
+    const workspaceId = verified.workspaceId;
+
     this.logger.log(`🔗 OAuth callback: platform=${platform}, workspace=${workspaceId}`);
 
     // MOCK FLOW
@@ -126,22 +141,22 @@ export class SocialAuthService {
 
     const provider = this.providerManager.getProvider(platform);
 
-    // TikTok: Retrieve stored PKCE code_verifier
+    // TikTok: Retrieve stored PKCE code_verifier (keyed by the signed state)
     let result;
     if (platform === Platform.tiktok && provider instanceof TikTokProvider) {
-      const pkceEntry = this.pkceStore.get(workspaceId);
+      const pkceEntry = this.pkceStore.get(state);
       if (!pkceEntry) {
-        this.logger.error(`❌ [TikTok] Không tìm thấy PKCE code_verifier cho state=${workspaceId}. Có thể đã hết hạn.`);
+        this.logger.error(`❌ [TikTok] Không tìm thấy PKCE code_verifier cho state đã ký. Có thể đã hết hạn.`);
         throw new Error('Phiên xác thực TikTok đã hết hạn (PKCE). Vui lòng thử kết nối lại.');
       }
 
-      this.logger.log(`[TikTok] Retrieved PKCE code_verifier for state=${workspaceId}`);
-      
+      this.logger.log(`[TikTok] Retrieved PKCE code_verifier for signed state`);
+
       // Exchange code với code_verifier
       result = await provider.authenticate(code, credentials, pkceEntry.codeVerifier);
-      
+
       // Xóa code_verifier sau khi dùng (one-time use)
-      this.pkceStore.delete(workspaceId);
+      this.pkceStore.delete(state);
     } else {
       // Facebook, YouTube — không cần PKCE
       result = await provider.authenticate(code, credentials);
@@ -277,17 +292,35 @@ export class SocialAuthService {
 
   /**
    * Hủy kết nối một hoặc nhiều tài khoản MXH
+   *
+   * IDOR fix (Req 8.5, 8.7): trước khi xóa, xác minh MỌI id được tham chiếu đều
+   * thuộc về workspace đang hoạt động. Nếu bất kỳ id nào thuộc workspace khác
+   * (hoặc không tồn tại), không xóa gì cả và trả về 404 — giống hệt not-found.
    */
-  async disconnectAccounts(ids: string[]): Promise<{ success: boolean; count: number }> {
+  async disconnectAccounts(
+    workspaceId: string,
+    ids: string[],
+  ): Promise<{ success: boolean; count: number }> {
     if (!ids || ids.length === 0) {
       return { success: true, count: 0 };
     }
 
+    // All-or-nothing ownership check BEFORE any delete (Req 8.5, 8.7).
+    await this.tenantScope.requireAllOwned(ids, {
+      countScoped: (scopedIds) =>
+        this.prisma.socialAccount.count({
+          where: { id: { in: scopedIds }, workspaceId },
+        }),
+      workspaceId,
+      resourceType: 'SocialAccount',
+    });
+
     this.logger.log(`🔌 [Disconnect Accounts] Đang xóa ${ids.length} tài khoản MXH: [${ids.join(', ')}]`);
-    
+
     const result = await this.prisma.socialAccount.deleteMany({
       where: {
         id: { in: ids },
+        workspaceId,
       },
     });
 
