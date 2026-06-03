@@ -74,4 +74,6 @@ EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl -fsS http://localhost:3001/health/live || exit 1
 
-CMD ["node", "apps/api/dist/main.js"]
+# Entrypoint: `nest build` (sourceRoot: src) emits the compiled entry at
+# dist/src/main.js (NOT dist/main.js), so the runtime path includes /src.
+CMD ["node", "apps/api/dist/src/main.js"]
