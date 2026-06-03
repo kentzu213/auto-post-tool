@@ -44,9 +44,6 @@ export const REQUIRED_BY_ROLE: Record<ConfigRole, readonly string[]> = {
     'S3_ACCESS_KEY',
     'S3_SECRET_KEY',
     'S3_BUCKET_NAME',
-    'FACEBOOK_CLIENT_SECRET',
-    'GOOGLE_CLIENT_SECRET',
-    'TIKTOK_CLIENT_SECRET',
     'CORS_ORIGINS',
   ],
   worker: [
@@ -58,9 +55,6 @@ export const REQUIRED_BY_ROLE: Record<ConfigRole, readonly string[]> = {
     'S3_ACCESS_KEY',
     'S3_SECRET_KEY',
     'S3_BUCKET_NAME',
-    'FACEBOOK_CLIENT_SECRET',
-    'GOOGLE_CLIENT_SECRET',
-    'TIKTOK_CLIENT_SECRET',
   ],
 };
 
