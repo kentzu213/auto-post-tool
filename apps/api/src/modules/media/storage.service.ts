@@ -157,4 +157,34 @@ export class StorageService {
   async headBucket(): Promise<void> {
     await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
   }
+
+  /**
+   * Readiness probe used by /health/ready.
+   *
+   * Readiness means "the object storage endpoint is REACHABLE" — not that the
+   * bucket has already been written to. On a fresh deployment the bucket is
+   * created lazily on the first upload (see ensureBucket), so a HeadBucket can
+   * legitimately return 404 (NoSuchBucket / NotFound) while MinIO itself is
+   * perfectly healthy. Treating that as `down` would wedge readiness (and the
+   * deploy smoke check that polls it) at 503 forever until the first upload.
+   *
+   * So: any HTTP response from the server (including 404) means reachable → ok.
+   * Only a transport-level failure (endpoint unreachable, DNS, refused
+   * connection — no `$metadata.httpStatusCode`) is a real readiness failure and
+   * is re-thrown.
+   */
+  async checkReady(): Promise<void> {
+    try {
+      await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
+    } catch (err) {
+      const httpStatus = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata
+        ?.httpStatusCode;
+      // Server responded (e.g. 404 for a missing bucket) → endpoint reachable.
+      if (typeof httpStatus === 'number') {
+        return;
+      }
+      // No HTTP response → transport error → storage genuinely down.
+      throw err;
+    }
+  }
 }

@@ -149,7 +149,7 @@ export class HealthController implements OnModuleDestroy {
   /** Object_Storage readiness via HeadBucket. Returns 'down' on any error/timeout. */
   private async checkStorage(): Promise<CheckStatus> {
     try {
-      await withTimeout(this.storage.headBucket(), CHECK_TIMEOUT_MS);
+      await withTimeout(this.storage.checkReady(), CHECK_TIMEOUT_MS);
       return 'up';
     } catch (err) {
       this.logger.warn(`Object_Storage readiness check failed: ${(err as Error).message}`);
