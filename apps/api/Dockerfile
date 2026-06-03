@@ -75,5 +75,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl -fsS http://localhost:3001/health/live || exit 1
 
 # Entrypoint: `nest build` (sourceRoot: src) emits the compiled entry at
-# dist/src/main.js (NOT dist/main.js), so the runtime path includes /src.
-CMD ["node", "apps/api/dist/src/main.js"]
+# dist/src/main.js, but some nest/tsc layouts emit dist/main.js. Pick whichever
+# exists at runtime so the image is robust to either layout.
+CMD ["sh", "-c", "if [ -f apps/api/dist/src/main.js ]; then exec node apps/api/dist/src/main.js; else exec node apps/api/dist/main.js; fi"]

@@ -77,11 +77,16 @@ EOF
 # shellcheck disable=SC1090
 set -a; . "$DEPLOY_DIR/.env"; set +a
 
-# 4. Rebuild web (API URL is baked at build time) + recreate web & caddy.
-log "Rebuilding web image with http API URL (this takes a few minutes) …"
-$COMPOSE build web
-log "Recreating web + caddy + api …"
-$COMPOSE up -d --no-deps api web caddy
+# 4. Rebuild app images (api/worker bake the CMD/fixes; web bakes the http API URL),
+# then recreate the WHOLE stack so data services + migrate run too.
+log "Rebuilding api + worker + web images …"
+$COMPOSE build api worker web
+log "Ensuring data services are up …"
+$COMPOSE up -d postgres redis minio
+log "Applying migrations …"
+$COMPOSE run --rm migrate || true
+log "Recreating full stack …"
+$COMPOSE up -d
 
 # 5. Smoke check over HTTP.
 log "Smoke check over HTTP …"
