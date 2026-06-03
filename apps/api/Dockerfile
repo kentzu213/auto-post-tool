@@ -14,7 +14,7 @@ WORKDIR /app
 RUN npm install -g pnpm@9.1.0
 
 # Copy files cấu hình Monorepo
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json tsconfig.json ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json ./
 COPY apps/api/package.json ./apps/api/
 COPY packages/shared-types/package.json ./packages/shared-types/
 COPY packages/ui/package.json ./packages/ui/
