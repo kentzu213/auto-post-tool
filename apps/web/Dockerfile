@@ -13,8 +13,9 @@ WORKDIR /app
 # Cài đặt pnpm toàn cục (pinned to repo packageManager for reproducible builds - Req 1.6)
 RUN npm install -g pnpm@9.1.0
 
-# Copy files cấu hình Monorepo
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json ./
+# Copy files cấu hình Monorepo (.npmrc carries node-linker=hoisted so the install
+# produces a flat root node_modules the runner image can use).
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json .npmrc ./
 COPY apps/web/package.json ./apps/web/
 COPY packages/shared-types/package.json ./packages/shared-types/
 COPY packages/ui/package.json ./packages/ui/
