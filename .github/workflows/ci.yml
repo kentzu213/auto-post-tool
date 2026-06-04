@@ -38,6 +38,9 @@ jobs:
         run: npx prisma generate
         working-directory: apps/api
 
+      - name: Build workspace packages (shared-types, ui) so tsc can resolve them
+        run: pnpm --filter "@auto-post/shared-types" build
+
       - name: Type Check — API
         run: npx tsc --noEmit
         working-directory: apps/api
@@ -71,6 +74,9 @@ jobs:
         run: npx prisma generate
         working-directory: apps/api
 
+      - name: Build workspace packages so the API can resolve them
+        run: pnpm --filter "@auto-post/shared-types" build
+
       - name: Run API Tests
         run: pnpm test -- --passWithNoTests --coverage
         working-directory: apps/api
@@ -95,6 +101,9 @@ jobs:
       - name: Generate Prisma Client
         run: npx prisma generate
         working-directory: apps/api
+
+      - name: Build workspace packages first (shared-types, ui)
+        run: pnpm --filter "@auto-post/shared-types" build
 
       - name: Build API
         run: pnpm run build
