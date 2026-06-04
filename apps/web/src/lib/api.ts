@@ -3,19 +3,30 @@
  * Base URL configurable via NEXT_PUBLIC_API_URL env var
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+/**
+ * Resolve the API base URL at CALL time (not module load) so a single build runs
+ * unchanged on any host/port/scheme:
+ *   1. If NEXT_PUBLIC_API_URL is set at build time, use it (absolute URL).
+ *   2. Otherwise call the SAME ORIGIN the app was loaded from, under "/api".
+ *      The reverse proxy (Caddy) routes "/api/*" to the API service and strips
+ *      the prefix. Nothing about the deploy IP/port is baked into the bundle,
+ *      and same-origin requests never hit CORS.
+ *   3. SSR/build fallback only (never used for real calls — every API call in
+ *      this app runs in the browser from a client component).
+ */
+function resolveApiBaseUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (configured) return configured.replace(/\/+$/, '');
+  if (typeof window !== 'undefined') return `${window.location.origin}/api`;
+  return 'http://localhost:3001';
+}
 
 interface RequestOptions extends RequestInit {
   params?: Record<string, string | number | boolean | undefined>;
 }
 
 class ApiClient {
-  private baseUrl: string;
   private token: string | null = null;
-
-  constructor(baseUrl: string) {
-    this.baseUrl = baseUrl;
-  }
 
   setToken(token: string | null) {
     this.token = token;
@@ -29,7 +40,7 @@ class ApiClient {
   }
 
   private buildUrl(path: string, params?: Record<string, string | number | boolean | undefined>): string {
-    const url = new URL(`${this.baseUrl}${path}`);
+    const url = new URL(`${resolveApiBaseUrl()}${path}`);
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
         if (value !== undefined) {
@@ -136,5 +147,5 @@ class ApiClient {
   }
 }
 
-export const api = new ApiClient(API_BASE_URL);
+export const api = new ApiClient();
 export default api;

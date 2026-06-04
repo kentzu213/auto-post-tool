@@ -81,20 +81,30 @@ PUBLIC_IP="$(curl -fsSL https://api.ipify.org || curl -fsSL https://ifconfig.me)
 IP_DASHED="${PUBLIC_IP//./-}"
 APP_HOST="app-${IP_DASHED}.sslip.io"
 API_HOST="api-${IP_DASHED}.sslip.io"
-log "Web http://${APP_HOST}  |  API http://${API_HOST}"
+# 80/443 on this box are already taken by another web server (a host Caddy from a
+# previous setup), so bind the evaluation stack to high ports instead.
+CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-8080}"
+CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-8443}"
+log "Web+API (same origin) http://${APP_HOST}:${CADDY_HTTP_PORT}  (API under /api)"
 
 # ---------------------------------------------------------------------------
 # 4. Generate .env (first run only; preserved afterwards)
 # ---------------------------------------------------------------------------
 ENV_FILE="$DEPLOY_DIR/.env"
+# Single-origin evaluation URL. Web + API are served by ONE Caddy vhost on a
+# non-standard port (80/443 are taken by another server on this box), and the
+# browser reaches the API same-origin under /api — so NO absolute API URL is
+# baked into the web bundle and there is no CORS.
+APP_URL="http://${APP_HOST}:${CADDY_HTTP_PORT}"
 if [ -f "$ENV_FILE" ]; then
-  log ".env exists — preserving secrets; refreshing public URLs to http://…"
-  sed -i '/^NEXT_PUBLIC_API_URL=/d;/^CORS_ORIGINS=/d;/^APP_HOST=/d;/^API_HOST=/d' "$ENV_FILE"
+  log ".env exists — preserving secrets; refreshing public URLs / ports…"
+  sed -i '/^NEXT_PUBLIC_API_URL=/d;/^CORS_ORIGINS=/d;/^APP_HOST=/d;/^API_HOST=/d;/^CADDY_HTTP_PORT=/d;/^CADDY_HTTPS_PORT=/d' "$ENV_FILE"
   {
     echo "APP_HOST=${APP_HOST}"
     echo "API_HOST=${API_HOST}"
-    echo "NEXT_PUBLIC_API_URL=http://${API_HOST}"
-    echo "CORS_ORIGINS=http://${APP_HOST}"
+    echo "CADDY_HTTP_PORT=${CADDY_HTTP_PORT}"
+    echo "CADDY_HTTPS_PORT=${CADDY_HTTPS_PORT}"
+    echo "CORS_ORIGINS=${APP_URL}"
   } >> "$ENV_FILE"
 else
   log "Generating .env with strong random secrets…"
@@ -127,8 +137,9 @@ ENCRYPTION_KEY=${ENC_KEY}
 OAUTH_STATE_SECRET=${JWT_SECRET}
 APP_HOST=${APP_HOST}
 API_HOST=${API_HOST}
-NEXT_PUBLIC_API_URL=http://${API_HOST}
-CORS_ORIGINS=http://${APP_HOST}
+CADDY_HTTP_PORT=${CADDY_HTTP_PORT}
+CADDY_HTTPS_PORT=${CADDY_HTTPS_PORT}
+CORS_ORIGINS=${APP_URL}
 BULL_BOARD_USER=admin
 BULL_BOARD_PASSWORD=${BULL_PW}
 FACEBOOK_CLIENT_ID=
@@ -151,27 +162,37 @@ sed -i "s|^REGISTRY_OWNER=.*|REGISTRY_OWNER=${REGISTRY_OWNER}|; s|^IMAGE_TAG=.*|
 set -a; . "$ENV_FILE"; set +a
 
 # ---------------------------------------------------------------------------
-# 5. HTTP-only Caddyfile
+# 5. HTTP-only Caddyfile — SINGLE origin. The browser loads the web app and the
+# API from the SAME host:port; "/api/*" is proxied to the api service (prefix
+# stripped) and everything else to the web service. This is why the web bundle
+# needs no absolute API URL (it calls window.location.origin + /api) and there
+# is no CORS. Caddy listens on :80 INSIDE the container; the host maps it to
+# ${CADDY_HTTP_PORT}. The :${CADDY_HTTP_PORT} in the site address tells Caddy the
+# public port so it builds correct redirects/links behind the port mapping.
 # ---------------------------------------------------------------------------
-log "Writing HTTP-only Caddyfile…"
+log "Writing HTTP-only same-origin Caddyfile (port ${CADDY_HTTP_PORT})…"
 cat > "$DEPLOY_DIR/Caddyfile" <<EOF
 {
 	auto_https off
 }
 
-http://${APP_HOST} {
+:80 {
 	encode gzip zstd
-	reverse_proxy web:3000 {
-		header_up X-Forwarded-Proto {scheme}
-		header_up X-Forwarded-Host {host}
-	}
-}
 
-http://${API_HOST} {
-	encode gzip zstd
-	reverse_proxy api:3001 {
-		header_up X-Forwarded-Proto {scheme}
-		header_up X-Forwarded-Host {host}
+	# API under /api/* → api:3001 with the /api prefix removed.
+	handle_path /api/* {
+		reverse_proxy api:3001 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+		}
+	}
+
+	# Everything else → the Next.js web app.
+	handle {
+		reverse_proxy web:3000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+		}
 	}
 }
 EOF
@@ -217,12 +238,13 @@ log "Recreating full stack from pulled images (no build)…"
 $COMPOSE up -d --no-build
 
 # ---------------------------------------------------------------------------
-# 7. Smoke check over HTTP
+# 7. Smoke check over HTTP (same-origin: API is under /api on the app port)
 # ---------------------------------------------------------------------------
 log "Smoke check…"
+BASE="http://${APP_HOST}:${CADDY_HTTP_PORT}"
 READY=""
 for i in $(seq 1 20); do
-  code="$(curl -fsS -o /dev/null -w '%{http_code}' "http://${API_HOST}/health/ready" 2>/dev/null || echo 000)"
+  code="$(curl -fsS -o /dev/null -w '%{http_code}' "${BASE}/api/health/ready" 2>/dev/null || echo 000)"
   if [ "$code" = "200" ]; then READY=1; break; fi
   sleep 3
 done
@@ -234,11 +256,11 @@ if [ -n "$READY" ]; then
 else
   echo " ⚠️  API not ready yet — check: $COMPOSE ps ; $COMPOSE logs --tail=40 api web caddy"
 fi
-echo "    Web : http://${APP_HOST}"
-echo "    API : http://${API_HOST}/health/ready"
-echo "    Ver : http://${API_HOST}/version"
+echo "    App : ${BASE}"
+echo "    API : ${BASE}/api/health/ready"
+echo "    Ver : ${BASE}/api/version"
 echo "=================================================================="
-curl -fsS "http://${API_HOST}/version" 2>/dev/null && echo
+curl -fsS "${BASE}/api/version" 2>/dev/null && echo
 $COMPOSE ps
 
 # ---------------------------------------------------------------------------

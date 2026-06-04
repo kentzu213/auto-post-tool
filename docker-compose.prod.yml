@@ -15,8 +15,10 @@ services:
       api:
         condition: service_healthy
     ports:
-      - '80:80'
-      - '443:443'
+      # Host ports are parametrized so an evaluation host can avoid colliding with
+      # another web server already on 80/443 (defaults preserve normal prod behavior).
+      - '${CADDY_HTTP_PORT:-80}:80'
+      - '${CADDY_HTTPS_PORT:-443}:443'
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
