@@ -192,6 +192,7 @@ log "Reclaiming disk: BuildKit cache + dangling images + stopped containers…"
 docker builder prune -af  >/dev/null 2>&1 || true
 docker image prune -af    >/dev/null 2>&1 || true
 docker container prune -f >/dev/null 2>&1 || true
+log "Docker space usage after prune:"; docker system df 2>/dev/null || true
 log "Disk usage AFTER cleanup:"; df -h / | tail -1
 
 log "Pulling prebuilt app images from GHCR (autopost-api/web/worker:${IMAGE_TAG})…"
