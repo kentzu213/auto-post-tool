@@ -43,6 +43,23 @@ fi
 systemctl enable --now docker >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
+# 1b. Reclaim disk BEFORE pulling. The earlier build-on-VPS attempts left tens of
+# GB of Docker build cache + dangling images in /var/lib/docker, which filled the
+# disk ("no space left on device" during layer extraction). On a pull-only host
+# the build cache is 100% garbage, so prune it aggressively. Safe: it never
+# touches named volumes (postgres/redis/minio data live in volumes, kept by
+# default; we do NOT pass --volumes).
+# ---------------------------------------------------------------------------
+log "Reclaiming disk (pruning old build cache + dangling images)…"
+df -h / | awk 'NR==1||/\//{print "   "$0}'
+docker builder prune -af >/dev/null 2>&1 || true
+docker image prune -af >/dev/null 2>&1 || true
+docker container prune -f >/dev/null 2>&1 || true
+docker network prune -f >/dev/null 2>&1 || true
+log "Disk after prune:"
+df -h / | awk 'NR==1||/\//{print "   "$0}'
+
+# ---------------------------------------------------------------------------
 # 2. Clone / update the repo (we still need the compose files + Caddyfile + .env)
 # ---------------------------------------------------------------------------
 if [ -d "$DEPLOY_DIR/.git" ]; then
@@ -160,9 +177,23 @@ http://${API_HOST} {
 EOF
 
 # ---------------------------------------------------------------------------
-# 6. Pull prebuilt images (NO build on the VPS) + bring up
+# 6. Reclaim disk space, then pull prebuilt images (NO build on the VPS)
 # ---------------------------------------------------------------------------
 export REGISTRY_OWNER IMAGE_TAG
+
+# ROOT CAUSE of earlier "no space left on device": the failed `docker compose
+# build` attempts left tens of GB of BuildKit cache + dangling images on the
+# disk, so containerd had no room to EXTRACT the pulled layers. Reclaim it now.
+# These are safe: builder cache is disposable, and prune only removes STOPPED
+# containers / UNREFERENCED images — running containers and named volumes (incl.
+# postgres_prod_data) are never touched.
+log "Disk usage BEFORE cleanup:"; df -h / | tail -1
+log "Reclaiming disk: BuildKit cache + dangling images + stopped containers…"
+docker builder prune -af  >/dev/null 2>&1 || true
+docker image prune -af    >/dev/null 2>&1 || true
+docker container prune -f >/dev/null 2>&1 || true
+log "Disk usage AFTER cleanup:"; df -h / | tail -1
+
 log "Pulling prebuilt app images from GHCR (autopost-api/web/worker:${IMAGE_TAG})…"
 $COMPOSE pull api web worker migrate || die "pull failed — are the GHCR packages public? See note at the end."
 
