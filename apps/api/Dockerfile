@@ -50,8 +50,10 @@ ARG BUILD_ID
 ENV APP_COMMIT_SHA=$COMMIT_SHA
 ENV APP_BUILD_ID=$BUILD_ID
 
-# curl is required by the container HEALTHCHECK below (Req 1.8)
-RUN apk add --no-cache curl
+# curl is required by the container HEALTHCHECK below (Req 1.8); openssl provides
+# libssl that Prisma's query/schema engine dynamically loads on Alpine (without it
+# the engine fails with "failed to detect libssl" / cannot parse engine response).
+RUN apk add --no-cache curl openssl
 
 # Copy built files và dependencies, owned by the unprivileged 'node' user so they are readable
 # at runtime (Req 1.4).

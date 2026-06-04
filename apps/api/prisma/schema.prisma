@@ -4,7 +4,12 @@ datasource db {
 }
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // Alpine (musl) + OpenSSL 3 runtime target in addition to the build host's
+  // native engine. Without this, Prisma's query/schema engine has no matching
+  // binary on the Alpine image and fails to load ("Could not parse schema engine
+  // response" / "failed to detect libssl"). node:20-alpine3.21 = musl + OpenSSL 3.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 // ============================================================

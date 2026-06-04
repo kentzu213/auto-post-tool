@@ -41,7 +41,8 @@ WORKDIR /app
 
 # CÀI ĐẶT FFMPEG THỰC TẾ CHO CONTAINER RUNNER
 # (fixed invalid `--no-image-history` flag -> plain `apk add --no-cache ffmpeg`)
-RUN apk add --no-cache ffmpeg
+# openssl provides libssl that Prisma's query engine dynamically loads on Alpine.
+RUN apk add --no-cache ffmpeg openssl
 
 ENV NODE_ENV=production
 
