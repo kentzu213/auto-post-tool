@@ -231,8 +231,8 @@ for i in $(seq 1 30); do
   sleep 2
 done
 
-log "Applying migrations (prisma migrate deploy)…"
-$COMPOSE run --rm migrate || warn "migrate returned non-zero (check logs)"
+log "Syncing database schema (prisma db push — covers tables/columns the broken migration history missed)…"
+$COMPOSE run --rm migrate node_modules/.bin/prisma db push --schema=apps/api/prisma/schema.prisma --skip-generate || warn "db push returned non-zero (check logs)"
 
 log "Recreating full stack from pulled images (no build)…"
 $COMPOSE up -d --no-build
