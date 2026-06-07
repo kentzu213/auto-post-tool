@@ -34,6 +34,15 @@ COPY . .
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
+# Supabase Auth (izziapi.com sync) is also NEXT_PUBLIC_* → must be baked at build.
+# When set, the login page authenticates against izziapi.com's Supabase and the
+# API verifies the token via /auth/supabase-sync. When empty, the app falls back
+# to local email/password auth. Public values (anon key is client-safe).
+ARG NEXT_PUBLIC_SUPABASE_URL
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
+ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+
 # Build dự án NextJS qua Turborepo (build dependencies first via the `...` suffix).
 RUN pnpm --filter @auto-post/web... build
 

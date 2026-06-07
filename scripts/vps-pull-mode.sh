@@ -85,6 +85,9 @@ API_HOST="api-${IP_DASHED}.sslip.io"
 # previous setup), so bind the evaluation stack to high ports instead.
 CADDY_HTTP_PORT="${CADDY_HTTP_PORT:-8080}"
 CADDY_HTTPS_PORT="${CADDY_HTTPS_PORT:-8443}"
+# Supabase (izziapi.com) — public values; the API verifies tokens against these.
+SUPABASE_URL="${SUPABASE_URL:-https://qdtfaebdgyyujygxnvqi.supabase.co}"
+SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkdGZhZWJkZ3l5dWp5Z3hudnFpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ1Mjk2NjYsImV4cCI6MjA5MDEwNTY2Nn0.tVQKuDcX3WFSNTPxiZU4aenv4OVsJ9bMouxYPiYkUck}"
 log "Web+API (same origin) http://${APP_HOST}:${CADDY_HTTP_PORT}  (API under /api)"
 
 # ---------------------------------------------------------------------------
@@ -98,13 +101,15 @@ ENV_FILE="$DEPLOY_DIR/.env"
 APP_URL="http://${APP_HOST}:${CADDY_HTTP_PORT}"
 if [ -f "$ENV_FILE" ]; then
   log ".env exists — preserving secrets; refreshing public URLs / ports…"
-  sed -i '/^NEXT_PUBLIC_API_URL=/d;/^CORS_ORIGINS=/d;/^APP_HOST=/d;/^API_HOST=/d;/^CADDY_HTTP_PORT=/d;/^CADDY_HTTPS_PORT=/d' "$ENV_FILE"
+  sed -i '/^NEXT_PUBLIC_API_URL=/d;/^CORS_ORIGINS=/d;/^APP_HOST=/d;/^API_HOST=/d;/^CADDY_HTTP_PORT=/d;/^CADDY_HTTPS_PORT=/d;/^NEXT_PUBLIC_SUPABASE_URL=/d;/^NEXT_PUBLIC_SUPABASE_ANON_KEY=/d' "$ENV_FILE"
   {
     echo "APP_HOST=${APP_HOST}"
     echo "API_HOST=${API_HOST}"
     echo "CADDY_HTTP_PORT=${CADDY_HTTP_PORT}"
     echo "CADDY_HTTPS_PORT=${CADDY_HTTPS_PORT}"
     echo "CORS_ORIGINS=${APP_URL}"
+    echo "NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}"
+    echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
   } >> "$ENV_FILE"
 else
   log "Generating .env with strong random secrets…"
@@ -140,6 +145,8 @@ API_HOST=${API_HOST}
 CADDY_HTTP_PORT=${CADDY_HTTP_PORT}
 CADDY_HTTPS_PORT=${CADDY_HTTPS_PORT}
 CORS_ORIGINS=${APP_URL}
+NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
+NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
 BULL_BOARD_USER=admin
 BULL_BOARD_PASSWORD=${BULL_PW}
 FACEBOOK_CLIENT_ID=

@@ -211,6 +211,8 @@ jobs:
             COMMIT_SHA=${{ github.sha }}
             BUILD_ID=${{ github.run_id }}
             NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+            NEXT_PUBLIC_SUPABASE_URL=${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
 
       # Fail the run on HIGH/CRITICAL findings BEFORE publishing (Req 9.3, 9.4).
       # Pinned to a full commit SHA, not a mutable version tag: trivy-action's version
@@ -252,3 +254,6 @@ jobs:
             COMMIT_SHA=${{ github.sha }}
             BUILD_ID=${{ github.run_id }}
             NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+            NEXT_PUBLIC_SUPABASE_URL=${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+
