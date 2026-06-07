@@ -28,9 +28,10 @@ const REQUIRED_WORKER_VARS: readonly string[] = [
   'S3_ACCESS_KEY',
   'S3_SECRET_KEY',
   'S3_BUCKET_NAME',
-  'FACEBOOK_CLIENT_SECRET',
-  'GOOGLE_CLIENT_SECRET',
-  'TIKTOK_CLIENT_SECRET',
+  // OAuth client secrets are NOT required to start the worker: publish.worker.ts
+  // falls back to mock values when absent, and real values are entered later via
+  // the Settings UI / provider credentials. Requiring them here crash-looped the
+  // worker on a fresh deploy. Mirrors the api config-loader (which dropped them too).
 ];
 
 /** ENCRYPTION_KEY must be exactly 64 hex chars = 32 bytes (mirrors CryptoService). */
